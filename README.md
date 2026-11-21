@@ -121,4 +121,7 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 
 ## Estado
 
-**APP-00 integrado en `develop`; APP-01 / LAB-06 en preparación en `feature/app-01-ghcr-publication`.** Sin lógica de negocio, persistencia, autenticación, despliegue K3s ni integración con Identity. La publicación real en GHCR se verificará únicamente al promover `develop` → `main`.
+- **APP-00 / LAB-05 (`PASS`):** base técnica .NET 10, health checks (`/health/live`, `/health/ready`) y pruebas HTTP xUnit v3 integrados en `develop` (PR #2).
+- **APP-01 / LAB-06 (`GHCR_PASS`):** pipeline de publicación integrado en `develop` (PR #3) y promovido a `main` (PR #4, SHA `3c46822c722f889cd715daa6d05beb58e143fb61`, workflow [`44880025884`](https://github.com/maverick0322/saas-platform/actions/runs/44880025884)).
+- **Imagen inmutable verificada:** `ghcr.io/maverick0322/saas-platform@sha256:104c651cd22324935c161314a28aeb7fd8728090710ad355b26cd37842b00746` (verificada mediante `sudo k3s crictl pull` en containerd: ID `e833cadbe2d3d`, 104 MB).
+- **Sin lógica de negocio ni persistencia:** el siguiente frente operativo es **LAB-07** (manifiestos Kubernetes mínimos en `saas-infra`), manteniendo las definiciones funcionales de Platform/Clinical en paralelo.

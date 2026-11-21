@@ -1,8 +1,9 @@
 # APP-01 / LAB-06 — Publicación independiente de Platform en GHCR
 
-- **Rama de trabajo:** `feature/app-01-ghcr-publication` (creada desde `develop` en `a8fcb5a`, tras el merge del PR #2 y CI verde en `develop`).
+- **Rama de implementación:** `feature/app-01-ghcr-publication` (integrada en `develop` mediante PR #3).
+- **Promoción a `main`:** PR #4 fusionado mediante merge commit (`3c46822c722f889cd715daa6d05beb58e143fb61`).
 - **Workflow extendido:** `.github/workflows/ci.yml` (preserva los nombres de checks `Build and test (.NET 10)` y `Docker build verification`).
-- **Estado de publicación GHCR:** `PENDING` (no se ha promovido a `main` ni publicado ninguna imagen).
+- **Estado de publicación GHCR:** **`GHCR_PASS`** (imagen publicada y verificada mediante `sudo k3s crictl pull` por digest).
 
 ## 1. Diseño del pipeline
 
@@ -63,9 +64,15 @@ Tras `docker push`, `publish-ghcr` consulta `docker inspect --format='{{index .R
 - Resolución de los 5 warnings `xUnit1051` en `tests/Saas.Platform.Tests/HealthEndpointsTests.cs` pasando `TestContext.Current.CancellationToken` a `HttpClient.GetAsync` y `HttpContent.ReadAsStringAsync`, manteniendo las 3 pruebas sin cambios funcionales.
 - Actualización de acciones de GitHub de Node.js 20 a versiones oficiales compatibles con Node.js 24 fijadas por SHA completo.
 
-## 4. Resultados y verificaciones pendientes
+## 4. Evidencias y resultados verificados
 
-- **Base verificada:** PR #2 fusionado en `develop` (`a8fcb5a`), CI de `develop` verde (`https://github.com/maverick0322/saas-platform/actions/runs/44876851817`).
-- **Validación local:** `dotnet restore` (`FAIL` por SDK local `9.0.306`), `dotnet build`/`test` y `docker build`/`run` (`NOT_RUN` por falta de SDK .NET 10 y daemon Docker detenido).
-- **CI remoto del PR a `develop`:** `PENDING` (se completará al abrir el PR de `feature/app-01-ghcr-publication` → `develop`; debe confirmar `CI_PASS` y `publish-ghcr` omitido).
-- **Publicación real en GHCR (`GHCR_PASS`):** `PENDING` — se verificará únicamente tras promover `develop` → `main` y comprobar `docker pull` del digest publicado.
+| Hito / Verificación | Estado | Evidencia |
+|---|---|---|
+| APP-00 / LAB-05 (PR #2 → `develop`) | `PASS` | `https://github.com/maverick0322/saas-platform/pull/2` (merge `a8fcb5a`, CI de `develop` `44876851817`). |
+| APP-01 / LAB-06 en PR #3 → `develop` | `CI_PASS` | `https://github.com/maverick0322/saas-platform/pull/3` (`build-and-test` y `docker-build` en verde; `publish-ghcr` omitido). |
+| Promoción `develop` → `main` (PR #4) | `PASS` | Merge commit `3c46822c722f889cd715daa6d05beb58e143fb61` en `main`. |
+| Workflow de publicación en `main` | `GHCR_PASS` | `https://github.com/maverick0322/saas-platform/actions/runs/44880025884` — los 3 jobs (`Build and test (.NET 10)`, `Docker build verification`, `Publish image to GHCR`) finalizaron con `success`. |
+| Imagen inmutable en GHCR | `GHCR_PASS` | `ghcr.io/maverick0322/saas-platform@sha256:104c651cd22324935c161314a28aeb7fd8728090710ad355b26cd37842b00746` |
+| Descarga y verificación en K3s (`containerd`) | `PASS` | `sudo k3s crictl pull` por digest exitoso — ID local `e833cadbe2d3d`, tamaño reportado `104 MB`. |
+| Validación local (.NET 9 / Docker detenido) | `FAIL` / `NOT_RUN` | En la estación local (`win-x64`) solo existía SDK `9.0.306` y Docker Desktop detenido; la validación oficial se ejecutó en GitHub Actions y K3s. |
+| Despliegue K3s / Argo CD / GitOps | `NEXT_SCOPE` | Siguiente alcance en `saas-infra`: LAB-07 (manifiestos Kubernetes), LAB-08 (Argo CD) y LAB-09 (CD GitOps). |
