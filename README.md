@@ -95,12 +95,30 @@ docker run --rm -p 8080:8080 saas-platform:local
 
 ## CI, GHCR y despliegue GitOps (separación de responsabilidades)
 
-- **CI de verificación (APP-00 / LAB-05 — `.github/workflows/ci.yml`):** se ejecuta en PR hacia `develop`/`main` y push a esas ramas con `permissions: contents: read`, sin secretos. Ejecuta `dotnet restore`, `build`, `test`, `docker build` y comprobación HTTP del contenedor. **No publica en GHCR.**
-- **Publicación GHCR (APP-01 / LAB-06, posterior):** publicará imágenes inmutables desde `main` con `packages: write` acotado al job de publicación.
+El workflow único [`.github/workflows/ci.yml`](.github/workflows/ci.yml) separa estrictamente la verificación de la publicación:
+
+- **Triggers:** `pull_request` hacia `develop` y `main`, y `push` en `develop` y `main`.
+- **CI de verificación (APP-00 / LAB-05):**
+  - `build-and-test` (`permissions: contents: read`): `dotnet restore`, `build` y `test` en `.NET 10` (xUnit v3 / VSTest).
+  - `docker-build` (`needs: build-and-test`, `permissions: contents: read`): construye la imagen `ghcr.io/maverick0322/saas-platform:<SHA>` con metadatos OCI (`org.opencontainers.image.source`, `revision`, `title`, `created`) y ejecuta el smoke test HTTP sobre `/health/live` y `/health/ready`.
+  - En PR y en `push` a `develop`, el flujo termina aquí: **no se publica ninguna imagen** ni se conceden credenciales de publicación.
+- **Publicación GHCR (APP-01 / LAB-06):**
+  - `publish-ghcr` (`needs: [build-and-test, docker-build]`, `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`, `permissions: packages: write`).
+  - Recibe la **misma imagen ya construida y verificada** desde `docker-build` mediante un artefacto temporal de la misma ejecución (`docker save` / `docker load`, retención 1 día), sin reconstruirla.
+  - Publica únicamente `ghcr.io/maverick0322/saas-platform:<FULL_COMMIT_SHA>` (sin etiqueta `latest`) autenticándose con `GITHUB_TOKEN`.
+  - Registra la referencia, el SHA de origen y el digest inmutable (`ghcr.io/maverick0322/saas-platform@sha256:...`) en el resumen del workflow (`GITHUB_STEP_SUMMARY`).
+- **Visibilidad y descarga desde GHCR:**
+  - La etiqueta `org.opencontainers.image.source` vincula el paquete al repositorio `maverick0322/saas-platform`. La visibilidad del paquete se gestiona en GitHub Packages (público o privado según política del repositorio).
+  - Si el paquete es público, se descarga sin autenticación; si es privado, requiere `docker login ghcr.io` con un token `read:packages`:
+    ```bash
+    docker pull ghcr.io/maverick0322/saas-platform:<FULL_COMMIT_SHA>
+    # o preferiblemente por digest inmutable:
+    docker pull ghcr.io/maverick0322/saas-platform@sha256:<DIGEST>
+    ```
 - **Kubernetes (LAB-07), Argo CD (LAB-08) y CD mediante GitOps (LAB-09, posteriores):** la promoción de versión desplegada ocurre mediante PR en `saas-infra` y sincronización de Argo CD. Fusionar a `main` o publicar en GHCR **no** demuestra despliegue en K3s.
 
-Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](docs/APP-00-ALCANCE.md) y [evidencia de validación APP-00](docs/APP-00-VALIDATION.md).
+Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](docs/APP-00-ALCANCE.md), [evidencia APP-00](docs/APP-00-VALIDATION.md) y [evidencia APP-01](docs/APP-01-VALIDATION.md).
 
 ## Estado
 
-**APP-00 — base técnica implementada en `feature/app-00-platform-baseline` (pendiente de verificación con .NET 10 SDK / Docker / CI remoto).** Sin lógica de negocio, persistencia, autenticación, publicación GHCR ni integración con Identity.
+**APP-00 integrado en `develop`; APP-01 / LAB-06 en preparación en `feature/app-01-ghcr-publication`.** Sin lógica de negocio, persistencia, autenticación, despliegue K3s ni integración con Identity. La publicación real en GHCR se verificará únicamente al promover `develop` → `main`.
