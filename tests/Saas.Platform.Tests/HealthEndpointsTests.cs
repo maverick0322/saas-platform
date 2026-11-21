@@ -13,12 +13,13 @@ public sealed class HealthEndpointsTests(WebApplicationFactory<Program> factory)
     [Fact]
     public async Task GetHealthLive_ReturnsOkWithProcessLivenessPayload()
     {
-        var response = await _client.GetAsync("/health/live");
+        var ct = TestContext.Current.CancellationToken;
+        var response = await _client.GetAsync("/health/live", ct);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
 
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         var root = document.RootElement;
 
         Assert.Equal("Healthy", root.GetProperty("status").GetString());
@@ -30,12 +31,13 @@ public sealed class HealthEndpointsTests(WebApplicationFactory<Program> factory)
     [Fact]
     public async Task GetHealthReady_ReturnsOkWithProcessOnlyReadinessPayload()
     {
-        var response = await _client.GetAsync("/health/ready");
+        var ct = TestContext.Current.CancellationToken;
+        var response = await _client.GetAsync("/health/ready", ct);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
 
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         var root = document.RootElement;
 
         Assert.Equal("Healthy", root.GetProperty("status").GetString());
@@ -47,7 +49,8 @@ public sealed class HealthEndpointsTests(WebApplicationFactory<Program> factory)
     [Fact]
     public async Task GetUnknownHealthRoute_ReturnsNotFound()
     {
-        var response = await _client.GetAsync("/health/unknown");
+        var ct = TestContext.Current.CancellationToken;
+        var response = await _client.GetAsync("/health/unknown", ct);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
