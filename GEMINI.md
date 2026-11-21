@@ -48,10 +48,10 @@ No declarar `PASS` a partir de inspección estática: registrar comandos, salida
 
 ## 6. Flujo Git y seguridad CI/CD
 
-- Ramas: `feature/*` desde `develop` → PR a `develop` → pruebas → PR a `main` (revisión requerida) → publicación GHCR → actualización de versión en `saas-infra` mediante PR → Argo CD → K3s.
+- Ramas: `feature/*` desde `develop` → PR a `develop` → pruebas → PR a `main` (checks requeridos; 0 aprobaciones humanas obligatorias) → publicación GHCR → actualización de versión por digest en `saas-infra` mediante PR → Argo CD → K3s. Tras promover a `main`, sincronizar `develop` mediante merge commit (no `squash`) para preservar ascendencia.
 - No hacer push directo a `main` o `develop`, ni force push, merge, cambios de rulesets, publicación, deploy, ni modificar `saas-infra` sin solicitud expresa.
 - No alterar `Vital`, `saas-identity` ni otros repositorios.
-- Workflows de validación con `permissions: contents: read`, sin secretos ni permisos de escritura en PR. `packages: write` reservado al trabajo futuro que publique en GHCR desde `main`.
+- Workflows de validación con `permissions: contents: read`, sin secretos ni permisos de escritura en PR. `packages: write` reservado al job de publicación en GHCR desde `main`.
 - No poner credenciales, claves de GitHub, tokens, datos ficticios que parezcan reales o información clínica en logs, commits o documentación.
 - No introducir acciones de GitHub no verificadas, dependencias arbitrarias ni infraestructura excesiva. Evitar checks requeridos inexistentes.
 
