@@ -116,7 +116,7 @@ El workflow único [`.github/workflows/ci.yml`](.github/workflows/ci.yml) separa
     # o preferiblemente por digest inmutable:
     docker pull ghcr.io/maverick0322/saas-platform@sha256:<DIGEST>
     ```
-- **Kubernetes (LAB-07), Argo CD (LAB-08) y CD mediante GitOps (LAB-09, posteriores):** la promoción de versión desplegada ocurre mediante PR en `saas-infra` y sincronización de Argo CD. Fusionar a `main` o publicar en GHCR **no** demuestra despliegue en K3s.
+- **Kubernetes (LAB-07), Argo CD (LAB-08) y CD mediante GitOps (LAB-09):** la promoción de versión desplegada ocurre mediante PR en `saas-infra` y sincronización de Argo CD. Fusionar a `main` o publicar en GHCR **no** demuestra despliegue en K3s.
 
 Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](docs/APP-00-ALCANCE.md), [evidencia APP-00](docs/APP-00-VALIDATION.md) y [evidencia APP-01](docs/APP-01-VALIDATION.md).
 
@@ -126,4 +126,9 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **APP-01 / LAB-06 (`GHCR_PASS`):** pipeline de publicación integrado en `develop` (PR #3) y promovido a `main` (PR #4, SHA `3c46822c722f889cd715daa6d05beb58e143fb61`, workflow [`44880025884`](https://github.com/maverick0322/saas-platform/actions/runs/44880025884)).
 - **Imagen inmutable verificada:** `ghcr.io/maverick0322/saas-platform@sha256:104c651cd22324935c161314a28aeb7fd8728090710ad355b26cd37842b00746` (verificada mediante `sudo k3s crictl pull` en containerd: ID `e833cadbe2d3d`, 104 MB).
 - **PLAT-00 (documental):** formalización de arquitectura multitenant ([`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md)) y de consistencia transaccional y aprovisionamiento ([`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md)), dejando el repositorio preparado para **PLAT-01** sin implementar todavía lógica de negocio ni persistencia.
-- **Sin lógica de negocio ni persistencia:** el siguiente frente operativo en infraestructura es **LAB-07** (manifiestos Kubernetes mínimos en `saas-infra`), manteniendo la preparación de **PLAT-01** y la conciliación de contratos pendientes en paralelo.
+- **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
+  - **LAB-07:** `PASS LOCAL`.
+  - **LAB-08:** `PASS LOCAL`.
+  - **LAB-09:** `PASS LOCAL`.
+  - **LAB-10:** pendiente.
+- **Sin lógica de negocio ni persistencia:** el siguiente frente en `saas-platform` es **PLAT-01**, manteniendo **LAB-10** y la conciliación de contratos pendientes en paralelo.

@@ -76,7 +76,7 @@ Hasta ahora, las reglas preventivas del repositorio excluían por defecto mecani
 
 ## Riesgos
 
-- **Compatibilidad CloudNativePG con K3s/Kubernetes 1.37.2:** versión probada en laboratorio, pero **no oficialmente soportada para CloudNativePG 1.30**; fallos en el operador o en la conciliación de CRDs pueden afectar el flujo de aprovisionamiento.
+- **Compatibilidad CloudNativePG con K3s/Kubernetes 1.37.2:** Kubernetes `1.37.2` figura como versión probada por upstream, pero **no está oficialmente soportada para CloudNativePG 1.30**; además, la **validación local de CloudNativePG en nuestro K3s sigue pendiente** (no se afirma que la integración funcione todavía en el laboratorio) y fallos en el operador o en la conciliación de CRDs pueden afectar el flujo de aprovisionamiento.
 - **Recursos limitados del laboratorio:** el nodo K3s actual (y la futura incorporación de Surface) impone tiempos de creación variables y restricciones de memoria/disco que pueden provocar timeouts o fallos transitorios durante el aprovisionamiento.
 - **Políticas de almacenamiento, credenciales, permisos y acceso entre servicios:** errores en RBAC de Kubernetes (API pública vs trabajador), generación/entrega de credenciales o políticas de almacenamiento persistente pueden comprometer seguridad o impedir la recuperación.
 - **Propiedad compartida accidental con Argo CD:** una mala separación de namespaces, etiquetas o manifiestos podría provocar que Argo CD intente sincronizar o podar recursos dinámicos creados por el aprovisionador.

@@ -27,7 +27,7 @@ Se adopta la **alternativa B: una instancia PostgreSQL independiente por tenant*
 
 ## Justificación
 
-- **Aislamiento fuerte de datos por clínica:** separar físicamente los datos en una instancia PostgreSQL por tenant reduce de manera drástica el riesgo de fugas transversales por errores en filtros `WHERE tenant_id = ...` y acota el impacto operativo por clínica.
+- **Aislamiento fuerte de datos por clínica:** asignar una instancia PostgreSQL independiente por tenant aísla el proceso del motor, sus conexiones y su almacenamiento respecto a otras clínicas (evitando compartir el mismo proceso PostgreSQL entre tenants y acotando el impacto operativo por clínica).
 - **Límites limpios entre microservicios:** asignar una base de datos independiente por servicio dentro de la instancia del tenant preserva la autonomía de modelo, evolución de esquema y migraciones de cada servicio (Platform, Identity, Clinical y demás servicios confirmados).
 - **Equilibrio frente a recursos del laboratorio:** compartir las instancias de aplicación de los microservicios evita multiplicar pods de cómputo .NET por cada clínica, haciendo viable demostrar cuatro o cinco tenants sintéticos en un laboratorio limitado.
 - **Operación declarativa en Kubernetes:** CloudNativePG permite modelar y administrar instancias PostgreSQL y sus recursos asociados de manera nativa en Kubernetes sin recurrir a scripts manuales de administración de bases de datos.
@@ -35,14 +35,14 @@ Se adopta la **alternativa B: una instancia PostgreSQL independiente por tenant*
 
 ## Alternativas consideradas
 
-1. **Alternativa A — Instancia PostgreSQL compartida con esquema compartido (`tenant_id` en tablas) o esquema por tenant:**
-   - *Ventajas:* menor consumo de memoria y almacenamiento en un laboratorio pequeño; menor complejidad de aprovisionamiento inicial.
-   - *Desventajas:* menor aislamiento físico entre clínicas; mayor exposición a errores de filtrado o configuración de Row-Level Security; mayor acoplamiento operativo entre tenants al compartir motor y recursos.
-   - *Motivo de descarte:* se prioriza un aislamiento de datos más fuerte y demostrable acorde al dominio clínico/académico del proyecto.
-2. **Silo completo (instancia de microservicios + instancia PostgreSQL dedicada por tenant):**
-   - *Ventajas:* aislamiento total de cómputo y datos.
-   - *Desventajas:* multiplicación inviable de pods, memoria y complejidad operativa en un nodo K3s de laboratorio para 4–5 tenants.
-   - *Motivo de descarte:* desproporcionado para el alcance, recursos y equipo del proyecto.
+1. **Alternativa A — Una instancia PostgreSQL por microservicio, con una base independiente por tenant dentro de esa instancia:**
+   - *Ventajas:* preserva *Database per Service* y *Database per Tenant*; menor cantidad total de instancias PostgreSQL respecto a las alternativas B y C.
+   - *Desventajas:* menor aislamiento entre clínicas al compartir el mismo proceso PostgreSQL entre varios tenants (mayor acoplamiento operativo y radio de impacto compartido a nivel de motor).
+   - *Motivo de descarte:* se prioriza un mayor aislamiento por clínica mediante instancias PostgreSQL independientes por tenant (alternativa B).
+2. **Alternativa C — Una instancia PostgreSQL por tenant y por microservicio:**
+   - *Ventajas:* máximo aislamiento a nivel de instancia PostgreSQL tanto por clínica como por servicio (manteniendo aplicaciones compartidas para Identity, Clinical y demás microservicios, sin requerir copias completas de los microservicios por tenant).
+   - *Desventajas:* multiplica el número de instancias PostgreSQL (`tenants × microservicios`), generando un consumo de memoria, almacenamiento y sobrecarga operativa desproporcionados para el laboratorio actual.
+   - *Motivo de descarte:* el costo de recursos y operación no se justifica frente a la alternativa B para el alcance y laboratorio del proyecto.
 3. **Base de datos única compartida entre todos los microservicios dentro del tenant:**
    - *Ventajas:* menos objetos de base de datos que crear por tenant.
    - *Desventajas:* acoplamiento por esquema, riesgo de consultas cruzadas, colisión de migraciones y pérdida de propiedad de datos por servicio.
@@ -56,21 +56,21 @@ Se adopta la **alternativa B: una instancia PostgreSQL independiente por tenant*
 
 ### Positivas
 
-- Cada clínica cuenta con una frontera física clara de almacenamiento y motor PostgreSQL.
+- Cada clínica cuenta con una instancia PostgreSQL independiente (proceso y almacenamiento dedicados al tenant, aunque varias instancias puedan compartir el mismo nodo Kubernetes o equipo físico).
 - Cada servicio evoluciona su propio esquema, entidades y migraciones de forma independiente.
 - El dominio de los microservicios no depende de direcciones físicas, nombres de clúster ni detalles de CloudNativePG.
 - Se evita la proliferación de copias de microservicios por tenant.
 
 ### Negativas y de costo operativo
 
-- Mayor consumo base de memoria, CPU y almacenamiento persistente en Kubernetes respecto a una instancia PostgreSQL compartida (una instancia por cada tenant más la base global de Platform).
+- Mayor consumo base de memoria, CPU y almacenamiento persistente en Kubernetes respecto a la alternativa A (una instancia PostgreSQL por cada tenant más la base global de Platform).
 - Los microservicios compartidos requieren un mecanismo seguro y auditable de resolución dinámica de cadena de conexión/credenciales por tenant autenticado y autorizado.
 - El alta de un tenant deja de ser únicamente un registro lógico en Platform y pasa a coordinar recursos PostgreSQL y preparación de bases de datos (véase [`ADR-0003`](ADR-0003-transactional-consistency-and-provisioning.md)).
 
 ## Riesgos
 
-- **Compatibilidad CloudNativePG con K3s/Kubernetes 1.37.2:** la versión de Kubernetes/K3s del laboratorio (`1.37.2`) ha sido probada, pero **no está oficialmente soportada para CloudNativePG 1.30**. Cualquier anomalía de CRD, API deprecada o comportamiento del operador deberá verificarse empíricamente antes de depender de funcionalidades avanzadas.
-- **Recursos limitados del laboratorio:** actualmente el entorno cuenta con un solo nodo K3s y se prevé la incorporación futura de una Surface. Crear más instancias PostgreSQL de las previstas (4–5 tenants sintéticos) o configurar solicitudes/límites inadecuados puede agotar memoria, CPU o disco.
+- **Compatibilidad CloudNativePG con K3s/Kubernetes 1.37.2:** la versión de Kubernetes `1.37.2` consta como probada por upstream, pero **no está oficialmente soportada para CloudNativePG 1.30**. Además, la **validación local de CloudNativePG sobre nuestro K3s sigue pendiente**; no se da por verificado su funcionamiento en el laboratorio hasta ejecutar dicha integración y comprobar empíricamente CRDs y comportamiento del operador.
+- **Recursos limitados del laboratorio:** actualmente el entorno cuenta con un solo nodo K3s (EVICTUS) y se prevé la incorporación futura de Surface. Crear más instancias PostgreSQL de las previstas (4–5 tenants sintéticos) o configurar solicitudes/límites inadecuados puede agotar memoria, CPU o disco.
 - **Almacenamiento persistente, credenciales, permisos y acceso entre servicios:** es necesario definir políticas claras para `StorageClass`/PVC, almacenamiento y entrega segura de credenciales por tenant y por servicio, mínimo privilegio de roles PostgreSQL y aislamiento/acceso de red entre servicios y bases de datos.
 - **Conflicto entre GitOps y recursos dinámicos:** gestionar recursos dinámicos de tenants con la misma propiedad que la infraestructura declarativa estática de Argo CD provocaría conflictos de reconciliación o borrados accidentales (tratado en [`ADR-0003`](ADR-0003-transactional-consistency-and-provisioning.md)).
 - **Resolución insegura de tenant:** resolver la conexión a partir de cabeceras o parámetros no validados abriría vulnerabilidades de acceso entre tenants.
@@ -78,7 +78,7 @@ Se adopta la **alternativa B: una instancia PostgreSQL independiente por tenant*
 
 ## Garantías
 
-- **Aislamiento físico por tenant:** los datos de dos clínicas distintas no residen en la misma instancia PostgreSQL.
+- **Instancias PostgreSQL independientes por tenant:** los datos de dos clínicas distintas no residen en la misma instancia PostgreSQL. Esta decisión garantiza **instancias PostgreSQL independientes**, no necesariamente equipos físicos separados: las instancias pueden compartir un mismo nodo Kubernetes o equipo físico, y su distribución entre EVICTUS y Surface dependerá de la topología efectiva del clúster.
 - **Aislamiento lógico por servicio:** ningún servicio accede directamente a la base de datos, tablas o entidades de otro servicio.
 - **Propiedad de migraciones:** cada servicio aplica y controla únicamente sus propias migraciones.
 - **Independencia del dominio:** el código de dominio no contiene dependencias hacia CloudNativePG, Kubernetes ni topología física de conexiones.
