@@ -37,3 +37,10 @@ Usar **Vertical Slice Architecture** como estilo interno: agrupar endpoints, han
 Mecanismo final de aprovisionamiento, topología tenant × servicio × BD, credenciales de migración, esquema de mensajes, RabbitMQ/Redis/Outbox, forma definitiva de los RPC con Identity, resolución de tenant antes del login y política de revocación de sesiones.
 
 La frontera con Identity se conserva en un **contrato candidato v0.1**, que requiere conciliación explícita entre integrantes antes de implementar la integración.
+
+## Referencias cruzadas posteriores
+
+Sin alterar el contenido histórico de este ADR, varias cuestiones listadas en *No decidido por este ADR* fueron formalizadas posteriormente en:
+
+- [`ADR-0002 — Persistencia multitenant y topología PostgreSQL`](ADR-0002-multitenant-persistence.md)
+- [`ADR-0003 — Consistencia transaccional y aprovisionamiento de tenants`](ADR-0003-transactional-consistency-and-provisioning.md)

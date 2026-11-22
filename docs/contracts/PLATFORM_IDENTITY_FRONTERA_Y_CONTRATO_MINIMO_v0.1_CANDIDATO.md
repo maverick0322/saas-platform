@@ -19,7 +19,7 @@
 | Cobros de pacientes y cortes | **Billing** (candidato) |
 | Composición de los ocho KPI | **BI** (candidato) |
 
-**Invariantes:** no compartir tablas/DbContext; no utilizar consultas SQL entre servicios; Platform nunca almacena contraseñas o refresh tokens; SuperAdmin no tiene acceso clínico. Platform tiene su propio catálogo global privado en PostgreSQL; la topología definitiva de bases por tenant sigue pendiente. Identity separa cuentas/credenciales por tenant, sin identidad global de profesionales.
+**Invariantes:** no compartir tablas/DbContext; no utilizar consultas SQL entre servicios; Platform nunca almacena contraseñas o refresh tokens; SuperAdmin no tiene acceso clínico. Platform tiene su propio catálogo global privado en PostgreSQL; la topología multitenant (instancia PostgreSQL por tenant con base de datos propia por servicio, administrada con CloudNativePG) y los criterios de aprovisionamiento/consistencia fueron formalizados posteriormente en [`ADR-0002`](../adr/ADR-0002-multitenant-persistence.md) y [`ADR-0003`](../adr/ADR-0003-transactional-consistency-and-provisioning.md) (este documento **permanece como borrador candidato no ratificado**). Identity separa cuentas/credenciales por tenant, sin identidad global de profesionales.
 
 ## 2. Estados mínimos del tenant
 

@@ -15,10 +15,11 @@ No gestiona pacientes, expedientes, sesiones, roles de Identity, cobros de pacie
 - **Vertical Slice Architecture**: organizar las funcionalidades por caso de uso cuando se aprueben.
 - Comandos y consultas mediante handlers ligeros; **sin** imponer un bus, broker, MediatR, CQRS distribuido ni event sourcing.
 - Dominio explícito únicamente para reglas e invariantes reales.
-- ASP.NET Core y .NET 10; PostgreSQL privado de Platform cuando se apruebe persistencia.
-- Una aplicación desplegable y versionada de manera independiente.
+- **Persistencia multitenant (`ADR-0002`)**: instancia PostgreSQL independiente por tenant administrada con **CloudNativePG**, base de datos propia por microservicio dentro de cada instancia y **base global independiente** para Platform; microservicios compartidos sin copias por tenant y resolución de conexiones fuera del dominio.
+- **Consistencia y aprovisionamiento (`ADR-0003`)**: transacciones ACID locales, operaciones distribuidas con invariantes e idempotencia explícitas (autorizando **Saga** cuando esté justificada y considerando **Transactional Outbox** si aplica, sin RabbitMQ/CQRS distribuido/event sourcing sin aprobación) y ejecución privilegiada de aprovisionamiento mediante un **componente trabajador de Platform** con permisos Kubernetes separados de la API pública y frontera estricta con Argo CD.
+- ASP.NET Core y .NET 10; una aplicación desplegable y versionada de manera independiente.
 
-Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md) y [`GEMINI.md`](GEMINI.md).
+Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md), [`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md), [`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md) y [`GEMINI.md`](GEMINI.md).
 
 ## Contrato Platform–Identity
 
@@ -115,7 +116,7 @@ El workflow único [`.github/workflows/ci.yml`](.github/workflows/ci.yml) separa
     # o preferiblemente por digest inmutable:
     docker pull ghcr.io/maverick0322/saas-platform@sha256:<DIGEST>
     ```
-- **Kubernetes (LAB-07), Argo CD (LAB-08) y CD mediante GitOps (LAB-09, posteriores):** la promoción de versión desplegada ocurre mediante PR en `saas-infra` y sincronización de Argo CD. Fusionar a `main` o publicar en GHCR **no** demuestra despliegue en K3s.
+- **Kubernetes (LAB-07), Argo CD (LAB-08) y CD mediante GitOps (LAB-09):** la promoción de versión desplegada ocurre mediante PR en `saas-infra` y sincronización de Argo CD. Fusionar a `main` o publicar en GHCR **no** demuestra despliegue en K3s.
 
 Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](docs/APP-00-ALCANCE.md), [evidencia APP-00](docs/APP-00-VALIDATION.md) y [evidencia APP-01](docs/APP-01-VALIDATION.md).
 
@@ -124,4 +125,10 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **APP-00 / LAB-05 (`PASS`):** base técnica .NET 10, health checks (`/health/live`, `/health/ready`) y pruebas HTTP xUnit v3 integrados en `develop` (PR #2).
 - **APP-01 / LAB-06 (`GHCR_PASS`):** pipeline de publicación integrado en `develop` (PR #3) y promovido a `main` (PR #4, SHA `3c46822c722f889cd715daa6d05beb58e143fb61`, workflow [`44880025884`](https://github.com/maverick0322/saas-platform/actions/runs/44880025884)).
 - **Imagen inmutable verificada:** `ghcr.io/maverick0322/saas-platform@sha256:104c651cd22324935c161314a28aeb7fd8728090710ad355b26cd37842b00746` (verificada mediante `sudo k3s crictl pull` en containerd: ID `e833cadbe2d3d`, 104 MB).
-- **Sin lógica de negocio ni persistencia:** el siguiente frente operativo es **LAB-07** (manifiestos Kubernetes mínimos en `saas-infra`), manteniendo las definiciones funcionales de Platform/Clinical en paralelo.
+- **PLAT-00 (documental):** formalización de arquitectura multitenant ([`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md)) y de consistencia transaccional y aprovisionamiento ([`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md)), dejando el repositorio preparado para **PLAT-01** sin implementar todavía lógica de negocio ni persistencia.
+- **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
+  - **LAB-07:** `PASS LOCAL`.
+  - **LAB-08:** `PASS LOCAL`.
+  - **LAB-09:** `PASS LOCAL`.
+  - **LAB-10:** pendiente.
+- **Sin lógica de negocio ni persistencia:** el siguiente frente en `saas-platform` es **PLAT-01**, manteniendo **LAB-10** y la conciliación de contratos pendientes en paralelo.
