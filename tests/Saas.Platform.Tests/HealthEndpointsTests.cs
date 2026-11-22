@@ -54,4 +54,23 @@ public sealed class HealthEndpointsTests(WebApplicationFactory<Program> factory)
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    [Theory]
+    [InlineData("GET", "/v1/tenants")]
+    [InlineData("POST", "/v1/tenants")]
+    [InlineData("GET", "/v1/tenants/01935500-0000-7000-8000-000000000001")]
+    [InlineData("GET", "/tenants")]
+    [InlineData("POST", "/tenants")]
+    [InlineData("GET", "/api/tenants")]
+    public async Task AdministrativeTenantRoutes_AreNotExposedAnonymously(string method, string path)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        request.Headers.Add("X-Role", "SuperAdmin");
+        request.Headers.Add("X-Tenant-Id", "clinica-sintetica-01");
+
+        var response = await _client.SendAsync(request, ct);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
 }

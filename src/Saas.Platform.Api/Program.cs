@@ -1,8 +1,33 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Saas.Platform.Api.Features.Tenants.GetTenantById;
+using Saas.Platform.Api.Features.Tenants.RegisterTenant;
+using Saas.Platform.Api.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSingleton(TimeProvider.System);
+
+builder.Services.AddDbContext<PlatformDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("PlatformDatabase");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new InvalidOperationException(
+            "Connection string 'PlatformDatabase' is not configured. Provide it via standard configuration or external secrets.");
+    }
+
+    options.UseNpgsql(
+        connectionString,
+        npgsqlOptions => npgsqlOptions.MigrationsHistoryTable(
+            PlatformDbContext.MigrationsHistoryTableName,
+            PlatformDbContext.SchemaName));
+});
+
+builder.Services.AddScoped<RegisterTenantHandler>();
+builder.Services.AddScoped<GetTenantByIdHandler>();
 
 builder.Services
     .AddHealthChecks()
@@ -10,6 +35,8 @@ builder.Services
 
 var app = builder.Build();
 
+// Technical health endpoints only. Administrative tenant HTTP endpoints are intentionally
+// deferred until SuperAdmin authentication and Identity contracts are ratified (PLAT-01).
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("live"),
