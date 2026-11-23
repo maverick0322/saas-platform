@@ -29,12 +29,34 @@ Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md), [`ADR-0002`](doc
 
 Estados mínimos del tenant **propuestos en el documento**: `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA`. No están implementados en APP-00.
 
-## Estructura actual (APP-00)
+## Estructura actual (PLAT-01)
 
 ```text
 Saas.Platform.sln
 src/
   Saas.Platform.Api/
+    Domain/
+      Tenant.cs
+      TenantValidationError.cs
+    Features/
+      Tenants/
+        GetTenantById/
+          GetTenantByIdHandler.cs
+          GetTenantByIdQuery.cs
+          TenantDetails.cs
+        RegisterTenant/
+          RegisterTenantCommand.cs
+          RegisterTenantHandler.cs
+          RegisterTenantResult.cs
+    Persistence/
+      Configurations/
+        TenantConfiguration.cs
+      Migrations/
+        20261122180000_InitialTenantCatalog.cs
+        20261122180000_InitialTenantCatalog.Designer.cs
+        PlatformDbContextModelSnapshot.cs
+      PlatformDbContext.cs
+      PlatformDbContextFactory.cs
     Program.cs
     Saas.Platform.Api.csproj
     appsettings.json
@@ -43,18 +65,32 @@ src/
 tests/
   Saas.Platform.Tests/
     HealthEndpointsTests.cs
+    PostgreSqlFixture.cs
+    TenantCatalogIntegrationTests.cs
+    TenantDomainValidationTests.cs
     Saas.Platform.Tests.csproj
 Dockerfile
 .dockerignore
 .github/workflows/ci.yml
 ```
 
-No se crean carpetas vacías (`Features/`, `Domain/`, `Infrastructure/`, `Common/`) ni slices de ejemplo. Cuando se autorice el primer caso de uso real, se agregará como slice autocontenido en `Features/`.
+Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 porque la autenticación definitiva de SuperAdmin y los contratos con Identity siguen pendientes de ratificación; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
 
 ## Prerrequisitos
 
 - **.NET 10 SDK** (`10.0.x`) para restaurar, compilar, ejecutar y probar localmente.
-- **Docker** (opcional localmente) para construir y verificar la imagen de contenedor.
+- **Docker** (en ejecución) para las pruebas de integración con PostgreSQL real mediante **Testcontainers** y para construir la imagen de contenedor. No se requiere K3s ni Argo CD para ejecutar `dotnet test`.
+
+## Persistencia global y migraciones (PLAT-01)
+
+- Platform utiliza su propia base PostgreSQL global (esquema `platform`, tabla `platform.tenants`), independiente de las instancias por tenant (`ADR-0002`).
+- La cadena de conexión se suministra mediante configuración estándar o secretos externos en `ConnectionStrings:PlatformDatabase` (variable de entorno `ConnectionStrings__PlatformDatabase`). No se almacenan credenciales reales en Git ni en `appsettings.json`.
+- El esquema se gestiona exclusivamente mediante migraciones versionadas de EF Core (`Persistence/Migrations/`); no se utiliza `EnsureCreated` ni se aplican migraciones automáticamente al arrancar la API o sobre bases de tenants.
+
+```bash
+# Aplicar migraciones manualmente contra una base PostgreSQL destino (requiere ConnectionStrings__PlatformDatabase)
+dotnet ef database update --project src/Saas.Platform.Api/Saas.Platform.Api.csproj
+```
 
 ## Comandos locales
 
@@ -83,7 +119,21 @@ curl -i http://localhost:8080/health/ready
 
 ## Pruebas automatizadas
 
-`tests/Saas.Platform.Tests/` ejecuta pruebas HTTP reales en memoria contra `Program` mediante `WebApplicationFactory<Program>`, sin requerir PostgreSQL, Docker ni Kubernetes. Cubre `/health/live`, `/health/ready` y respuesta `404` ante rutas inexistentes.
+`tests/Saas.Platform.Tests/` incluye:
+
+- **Pruebas HTTP técnicas y de seguridad (`HealthEndpointsTests`):** ejecutan `Program` en memoria mediante `WebApplicationFactory<Program>` sin requerir PostgreSQL ni Kubernetes; verifican `/health/live`, `/health/ready`, `404` ante rutas inexistentes y la ausencia de endpoints administrativos anónimos.
+- **Pruebas unitarias de dominio (`TenantDomainValidationTests`):** verifican normalización e invariantes administrativas mínimas de `Tenant` sin dependencias externas.
+- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migración inicial reproducible sobre base vacía (sin cambios de modelo pendientes), persistencia real tras recrear `PlatformDbContext`, unicidad de `public_id`, concurrencia de altas duplicadas, concurrencia optimista (`DbUpdateConcurrencyException`) y restricciones `CHECK` en PostgreSQL.
+
+```bash
+# Ejecutar toda la suite (requiere .NET 10 SDK y Docker activo para Testcontainers)
+dotnet test Saas.Platform.sln --configuration Release
+
+# Ejecutar únicamente pruebas sin Docker (dominio y endpoints técnicos)
+dotnet test Saas.Platform.sln --configuration Release --filter "FullyQualifiedName!~TenantCatalogIntegrationTests"
+```
+
+En GitHub Actions (`ubuntu-latest`), `dotnet test` ejecuta la suite completa, incluidas las pruebas de integración con PostgreSQL real vía Testcontainers (no se omiten silenciosamente).
 
 ## Docker
 
@@ -125,10 +175,10 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **APP-00 / LAB-05 (`PASS`):** base técnica .NET 10, health checks (`/health/live`, `/health/ready`) y pruebas HTTP xUnit v3 integrados en `develop` (PR #2).
 - **APP-01 / LAB-06 (`GHCR_PASS`):** pipeline de publicación integrado en `develop` (PR #3) y promovido a `main` (PR #4, SHA `3c46822c722f889cd715daa6d05beb58e143fb61`, workflow [`44880025884`](https://github.com/maverick0322/saas-platform/actions/runs/44880025884)).
 - **Imagen inmutable verificada:** `ghcr.io/maverick0322/saas-platform@sha256:104c651cd22324935c161314a28aeb7fd8728090710ad355b26cd37842b00746` (verificada mediante `sudo k3s crictl pull` en containerd: ID `e833cadbe2d3d`, 104 MB).
-- **PLAT-00 (documental):** formalización de arquitectura multitenant ([`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md)) y de consistencia transaccional y aprovisionamiento ([`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md)), dejando el repositorio preparado para **PLAT-01** sin implementar todavía lógica de negocio ni persistencia.
+- **PLAT-00 (documental, integrado en `develop` vía PR #7):** formalización de arquitectura multitenant ([`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md)) y de consistencia transaccional y aprovisionamiento ([`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md)).
+- **PLAT-01 (catálogo global y persistencia de Platform):** `PlatformDbContext` global con EF Core + PostgreSQL, migración inicial versionada (`20261122180000_InitialTenantCatalog`), vertical slices internos (`RegisterTenant`, `GetTenantById`) y pruebas de integración con Testcontainers. Rutas HTTP administrativas diferidas hasta ratificar autenticación de SuperAdmin y contratos con Identity.
 - **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
   - **LAB-07:** `PASS LOCAL`.
   - **LAB-08:** `PASS LOCAL`.
   - **LAB-09:** `PASS LOCAL`.
   - **LAB-10:** pendiente.
-- **Sin lógica de negocio ni persistencia:** el siguiente frente en `saas-platform` es **PLAT-01**, manteniendo **LAB-10** y la conciliación de contratos pendientes en paralelo.
