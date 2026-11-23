@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package vital.platform_identity.v1;
+
+option csharp_namespace = "Saas.Contracts.PlatformIdentity.V1";
+
+service IdentityProvisioningService {
+  rpc ProvisionInitialClinicAdmin (ProvisionInitialClinicAdminRequest) returns (ProvisionInitialClinicAdminResponse);
+}
+
+service TenantAccessService {
+  rpc GetTenantAccessState (GetTenantAccessStateRequest) returns (GetTenantAccessStateResponse);
+}
+
+enum ProvisioningStatus {
+  PROVISIONING_STATUS_UNSPECIFIED = 0;
+  PROVISIONING_STATUS_PENDING_ACTIVATION = 1;
+  PROVISIONING_STATUS_READY = 2;
+  PROVISIONING_STATUS_FAILED = 3;
+}
+
+enum TenantOperationalState {
+  TENANT_OPERATIONAL_STATE_UNSPECIFIED = 0;
+  TENANT_OPERATIONAL_STATE_PENDIENTE_ADMIN = 1;
+  TENANT_OPERATIONAL_STATE_ACTIVA = 2;
+  TENANT_OPERATIONAL_STATE_SUSPENDIDA = 3;
+}
+
+message ProvisionInitialClinicAdminRequest {
+  string tenant_id = 1;
+  string provisioning_request_id = 2;
+  string clinic_slug = 3;
+  string clinic_name = 4;
+  string admin_full_name = 5;
+  string admin_email = 6;
+}
+
+message ProvisionInitialClinicAdminResponse {
+  string tenant_id = 1;
+  string provisioning_request_id = 2;
+  string initial_admin_account_id = 3;
+  ProvisioningStatus status = 4;
+  string evaluated_at_gmt6 = 5;
+  bool temporary_password_email_sent = 6;
+}
+
+message GetTenantAccessStateRequest {
+  oneof lookup {
+    string tenant_id = 1;
+    string slug = 2;
+  }
+}
+
+message GetTenantAccessStateResponse {
+  string tenant_id = 1;
+  string slug = 2;
+  string name = 3;
+  TenantOperationalState state = 4;
+  bool may_authenticate = 5;
+  int32 max_active_accounts = 6;
+  string evaluated_at_gmt6 = 7;
+}
