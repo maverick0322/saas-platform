@@ -23,6 +23,7 @@ public sealed class RegisterTenantHandler(
             command.PublicId,
             command.Name,
             command.ContactEmail,
+            command.MaxActiveAccounts,
             utcNow,
             out var tenant,
             out var tenantErrors);

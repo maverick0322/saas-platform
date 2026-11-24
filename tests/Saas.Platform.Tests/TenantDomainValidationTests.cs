@@ -14,6 +14,7 @@ public sealed class TenantDomainValidationTests
             publicId: "  Clinica-San-Mateo-01  ",
             name: "  Clínica Sintética San Mateo  ",
             contactEmail: "  Admin.SanMateo@Clinica-Sintetica.Test  ",
+            maxActiveAccounts: 25,
             createdAtUtc: FixedUtcNow,
             out var tenant,
             out var errors);
@@ -25,6 +26,7 @@ public sealed class TenantDomainValidationTests
         Assert.Equal("clinica-san-mateo-01", tenant.PublicId);
         Assert.Equal("Clínica Sintética San Mateo", tenant.Name);
         Assert.Equal("admin.sanmateo@clinica-sintetica.test", tenant.ContactEmail);
+        Assert.Equal(25, tenant.MaxActiveAccounts);
         Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
         Assert.False(tenant.MayAuthenticate);
         Assert.Equal(FixedUtcNow, tenant.CreatedAtUtc);
@@ -49,6 +51,7 @@ public sealed class TenantDomainValidationTests
             publicId: publicId,
             name: "Clínica Sintética Norte",
             contactEmail: "contacto@clinica-norte.test",
+            maxActiveAccounts: 10,
             createdAtUtc: FixedUtcNow,
             out var tenant,
             out var errors);
@@ -70,6 +73,7 @@ public sealed class TenantDomainValidationTests
             publicId: "clinica-sur-01",
             name: name,
             contactEmail: "contacto@clinica-sur.test",
+            maxActiveAccounts: 10,
             createdAtUtc: FixedUtcNow,
             out var tenant,
             out var errors);
@@ -94,6 +98,7 @@ public sealed class TenantDomainValidationTests
             publicId: "clinica-este-01",
             name: "Clínica Sintética Este",
             contactEmail: email,
+            maxActiveAccounts: 10,
             createdAtUtc: FixedUtcNow,
             out var tenant,
             out var errors);
@@ -110,6 +115,7 @@ public sealed class TenantDomainValidationTests
             publicId: "x",
             name: "",
             contactEmail: "invalido",
+            maxActiveAccounts: 10,
             createdAtUtc: FixedUtcNow,
             out var tenant,
             out var errors);
@@ -122,6 +128,26 @@ public sealed class TenantDomainValidationTests
         Assert.Contains(errors, e => e.Field == nameof(Tenant.ContactEmail));
     }
 
+    [Theory]
+    [InlineData(null, "required")]
+    [InlineData(0, "range")]
+    [InlineData(-5, "range")]
+    public void TryRegister_WithInvalidMaxActiveAccounts_ReturnsExpectedValidationError(int? quota, string expectedCode)
+    {
+        var ok = Tenant.TryRegister(
+            publicId: "clinica-cuota-01",
+            name: "Clínica Sintética Cuota",
+            contactEmail: "contacto@clinica-cuota.test",
+            maxActiveAccounts: quota,
+            createdAtUtc: FixedUtcNow,
+            out var tenant,
+            out var errors);
+
+        Assert.False(ok);
+        Assert.Null(tenant);
+        Assert.Contains(errors, e => e.Field == nameof(Tenant.MaxActiveAccounts) && e.Code == expectedCode);
+    }
+
     [Fact]
     public void CanActivate_WithIdentityReadyAlone_RejectsActivationBecauseInfrastructureIsNotConfirmed()
     {
@@ -129,6 +155,7 @@ public sealed class TenantDomainValidationTests
             "clinica-prereq-01",
             "Clínica Sintética Prerrequisitos",
             "contacto@clinica-prereq.test",
+            15,
             FixedUtcNow,
             out var tenant,
             out _);
@@ -157,6 +184,7 @@ public sealed class TenantDomainValidationTests
             "clinica-prereq-02",
             "Clínica Sintética Sin Identity",
             "contacto@clinica-prereq-02.test",
+            15,
             FixedUtcNow,
             out var tenant,
             out _);
@@ -184,6 +212,7 @@ public sealed class TenantDomainValidationTests
             "clinica-prereq-03",
             "Clínica Sintética Completa",
             "contacto@clinica-prereq-03.test",
+            15,
             FixedUtcNow,
             out var tenant,
             out _);

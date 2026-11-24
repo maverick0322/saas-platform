@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Saas.Platform.Api;
 using Saas.Platform.Api.Domain;
 using Saas.Platform.Api.Features.Provisioning;
+using Saas.Platform.Api.Features.Tenants.GetTenantAccessState;
 using Xunit;
 
 namespace Saas.Platform.Tests;
@@ -111,5 +112,54 @@ public sealed class ProvisioningWorkerCoreTests
             TenantProvisioningOperation.SanitizeTechnicalReference("Host=localhost;Database=x;Password=secret"));
         Assert.Throws<ArgumentException>(() =>
             TenantProvisioningOperation.SanitizeTechnicalReference("ref\nwith-newline"));
+    }
+
+    [Fact]
+    public void WorkerHost_DoesNotRegisterGrpcServerOrTenantAccessServices_EvenIfEnabledInArgs()
+    {
+        using var host = PlatformHostFactory.CreateWorkerHost(
+            [
+                "--ConnectionStrings:PlatformDatabase=Host=localhost;Port=5432;Database=saas_platform_design;Username=postgres",
+                "--InternalGrpc:Enabled=true",
+                "--InternalGrpc:Port=8092",
+                "--InternalGrpc:InternalServiceKey=SyntheticTestOnlyServiceKey123!"
+            ]);
+
+        Assert.Null(host.Services.GetService<IServer>());
+        Assert.Null(host.Services.GetService<InternalGrpcOptions>());
+        Assert.Null(host.Services.GetService<GetTenantAccessStateHandler>());
+        Assert.Null(host.Services.GetService<TenantAccessGrpcService>());
+    }
+
+    [Fact]
+    public void InternalGrpcOptions_ValidatesKeyAndPortAndMatchesInConstantTime()
+    {
+        var disabled = new InternalGrpcOptions { Enabled = false };
+        disabled.ValidateWhenEnabled(8080);
+
+        var missingKey = new InternalGrpcOptions { Enabled = true, Port = 8092, InternalServiceKey = "" };
+        Assert.Throws<InvalidOperationException>(() => missingKey.ValidateWhenEnabled(8080));
+
+        var shortKey = new InternalGrpcOptions { Enabled = true, Port = 8092, InternalServiceKey = "short-key" };
+        Assert.Throws<InvalidOperationException>(() => shortKey.ValidateWhenEnabled(8080));
+
+        var samePort = new InternalGrpcOptions
+        {
+            Enabled = true,
+            Port = 8080,
+            InternalServiceKey = "SyntheticTestOnlyServiceKey123!"
+        };
+        Assert.Throws<InvalidOperationException>(() => samePort.ValidateWhenEnabled(8080));
+
+        var valid = new InternalGrpcOptions
+        {
+            Enabled = true,
+            Port = 8092,
+            InternalServiceKey = "SyntheticTestOnlyServiceKey123!"
+        };
+        valid.ValidateWhenEnabled(8080);
+        Assert.True(valid.MatchesServiceKey("SyntheticTestOnlyServiceKey123!"));
+        Assert.False(valid.MatchesServiceKey("SyntheticTestOnlyServiceKey123?"));
+        Assert.False(valid.MatchesServiceKey(null));
     }
 }

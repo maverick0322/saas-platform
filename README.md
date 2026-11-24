@@ -27,9 +27,9 @@ Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md), [`ADR-0002`](doc
 
 **El documento no está ratificado por ambos integrantes.** Los RPC, esquemas, rutas y mecanismos de autenticación propuestos **no están autorizados para implementación definitiva** hasta cerrar D-01 a D-04. La preparación técnica de APP-00 es independiente de ese acuerdo.
 
-Estados operativos del tenant (`PENDIENTE_ADMIN`, `ACTIVA`, `SUSPENDIDA`) incorporados en el modelo de dominio y catálogo global de **PLAT-02A** (toda clínica inicia en `PENDIENTE_ADMIN`). `Identity READY` es **necesario pero no suficiente** para pasar a `ACTIVA` (`ADR-0002` / `ADR-0003`); la activación efectiva, el trabajador de aprovisionamiento y la integración gRPC siguen fuera de alcance hasta sus incrementos aprobados.
+Estados operativos del tenant (`PENDIENTE_ADMIN`, `ACTIVA`, `SUSPENDIDA`) incorporados en el modelo de dominio y catálogo global de **PLAT-02A** (toda clínica inicia en `PENDIENTE_ADMIN`). `Identity READY` es **necesario pero no suficiente** para pasar a `ACTIVA` (`ADR-0002` / `ADR-0003`); a partir de **PLAT-03A**, la API expone opcionalmente la consulta gRPC interna `TenantAccessService.GetTenantAccessState` (v1), manteniendo fuera de alcance la activación efectiva, las rutas HTTP administrativas y los adaptadores externos del trabajador.
 
-## Estructura actual (PLAT-02C)
+## Estructura actual (PLAT-03A)
 
 ```text
 Saas.Platform.sln
@@ -54,6 +54,12 @@ src/
         ProvisioningWorkerOptions.cs
         UnconfiguredProvisioningStageExecutor.cs
       Tenants/
+        GetTenantAccessState/
+          GetTenantAccessStateHandler.cs
+          GetTenantAccessStateQuery.cs
+          GetTenantAccessStateResult.cs
+          InternalGrpcOptions.cs
+          TenantAccessGrpcService.cs
         GetTenantById/
           GetTenantByIdHandler.cs
           GetTenantByIdQuery.cs
@@ -74,6 +80,8 @@ src/
         20261124053749_AddTenantOperationalStateAndProvisioningOperations.Designer.cs
         20261124070500_AddProvisioningWorkerLeaseAndStageProgress.cs
         20261124070500_AddProvisioningWorkerLeaseAndStageProgress.Designer.cs
+        20261124093133_AddTenantMaxActiveAccounts.cs
+        20261124093133_AddTenantMaxActiveAccounts.Designer.cs
         PlatformDbContextModelSnapshot.cs
       PlatformDbContext.cs
       PlatformDbContextFactory.cs
@@ -90,6 +98,7 @@ tests/
     PostgreSqlFixture.cs
     ProvisioningWorkerCoreTests.cs
     ProvisioningWorkerIntegrationTests.cs
+    TenantAccessGrpcIntegrationTests.cs
     TenantCatalogIntegrationTests.cs
     TenantDomainValidationTests.cs
     TenantProvisioningIntegrationTests.cs
@@ -99,7 +108,16 @@ Dockerfile
 .github/workflows/ci.yml
 ```
 
-Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 / PLAT-02A / PLAT-02C porque la autenticación definitiva de SuperAdmin y los contratos con Identity siguen pendientes de ratificación; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
+Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 / PLAT-02A / PLAT-02C / PLAT-03A porque la autenticación definitiva de SuperAdmin sigue pendiente; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
+
+### Servidor gRPC interno Platform–Identity (`PLAT-03A`)
+
+Cuando `InternalGrpc:Enabled=true` (`InternalGrpc__Enabled=true`), el host API de Platform habilita Kestrel con separación explícita de protocolos:
+- **HTTP/1.1 (`Ports:Http`, por defecto `8080`):** endpoints técnicos `/health/live` y `/health/ready`.
+- **HTTP/2 `h2c` (`InternalGrpc:Port`, por defecto `8092`):** servicio Protobuf v1 `vital.platform_identity.v1.TenantAccessService/GetTenantAccessState`, sin modificar `platform_identity.proto`.
+- **Autenticación y fallo cerrado:** exige la metadata gRPC `x-internal-service-key` validada en tiempo constante (`CryptographicOperations.FixedTimeEquals`) frente a `InternalGrpc:InternalServiceKey` (mínimo 16 bytes UTF-8, suministrada exclusivamente por configuración segura o variables de entorno, nunca en código/Git). Si `InternalGrpc:Enabled=true` sin clave válida, el arranque falla explícitamente (`InvalidOperationException`).
+- **Cuota por clínica (`max_active_accounts`):** persistida explícitamente en `platform.tenants.max_active_accounts` (`>= 1`, sin inventar planes ni valores globales silenciosos). Los registros previos a PLAT-03A permanecen en `PENDIENTE_ADMIN` con `max_active_accounts = NULL`; ante cuota ausente o falla de PostgreSQL, el servidor responde con fallo controlado (`FailedPrecondition` / `Unavailable`) sin conceder acceso.
+- **Dependencias nuevas:** `Grpc.AspNetCore` (`2.71.0`) en `Saas.Platform.Api` (compilación servidor `.proto` v1) y `Grpc.Net.Client` (`2.71.0`) en `Saas.Platform.Tests`.
 
 ### Modo trabajador separado (`PLAT-02C`)
 
@@ -155,7 +173,7 @@ curl -i http://localhost:8080/health/ready
 
 - **Pruebas HTTP técnicas y de seguridad (`HealthEndpointsTests`):** ejecutan `Program` en memoria mediante `WebApplicationFactory<Program>` sin requerir PostgreSQL ni Kubernetes; verifican `/health/live`, `/health/ready`, `404` ante rutas inexistentes y la ausencia de endpoints administrativos anónimos.
 - **Pruebas unitarias de dominio y trabajador (`TenantDomainValidationTests`, `ProvisioningWorkerCoreTests`):** verifican normalización, invariantes administrativas de `Tenant`, prerequisitos de activación (`CanActivate`), invariantes de `TenantProvisioningOperation`, sanitización de diagnósticos sin secretos/JWT/cadenas de conexión, configuración/backoff del trabajador y separación segura entre modos `Api` y `Worker`.
-- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`, `TenantProvisioningIntegrationTests`, `ProvisioningWorkerIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migraciones reproducibles sobre base vacía y sobre esquemas PLAT-01/PLAT-02A previos, persistencia atómica ACID de tenant + operación, adquisición atómica con `FOR UPDATE SKIP LOCKED`, exclusión concurrente, renovación periódica de *lease* durante etapas prolongadas, cancelación y rechazo de escrituras obsoletas (*fencing*) al perder el *lease*, recuperación conservadora (`VERIFICATION_REQUIRED`) tras caídas sin duplicar efectos externos, conteo exacto de intentos iniciados, reintentos limitados con espera exponencial, errores transitorios/terminales, rechazo de evidencia simulada y ausencia de activaciones falsas.
+- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`, `TenantProvisioningIntegrationTests`, `ProvisioningWorkerIntegrationTests`, `TenantAccessGrpcIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migraciones reproducibles sobre base vacía y sobre esquemas PLAT-01/PLAT-02A/PLAT-02C previos, persistencia atómica ACID de tenant + operación, adquisición atómica con `FOR UPDATE SKIP LOCKED`, exclusión concurrente, renovación periódica de *lease* durante etapas prolongadas, cancelación y rechazo de escrituras obsoletas (*fencing*) al perder el *lease*, recuperación conservadora (`VERIFICATION_REQUIRED`) tras caídas sin duplicar efectos externos, conteo exacto de intentos iniciados, reintentos limitados con espera exponencial, errores transitorios/terminales, rechazo de evidencia simulada, ausencia de activaciones falsas y llamadas gRPC HTTP/2 reales a `TenantAccessService/GetTenantAccessState` (UUID, slug normalizado, estados operativos, cuotas independientes por clínica, `x-internal-service-key` en tiempo constante y fallo cerrado ante cuota ausente o caída de PostgreSQL).
 
 ```bash
 # Ejecutar toda la suite (requiere .NET 10 SDK y Docker activo para Testcontainers)
@@ -212,6 +230,7 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **PLAT-02A (estados operativos y aprovisionamiento durable):** estados `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA` en `Tenant` (inicio obligatorio en `PENDIENTE_ADMIN` y bloqueo de activación sin prerrequisitos completos), entidad durable `TenantProvisioningOperation` con `provisioning_request_id` estable, migración versionada incremental (`20261124053749_AddTenantOperationalStateAndProvisioningOperations`), registro atómico ACID y representación administrativa preparada en `GetTenantById` (sin trabajador, CloudNativePG, llamadas gRPC, activación efectiva ni rutas administrativas anónimas).
 - **PLAT-02B (diseño del trabajador y contratos mínimos, PR #12):** especificación lógica de arrendamiento, recuperación, reintentos y contratos mínimos en [`docs/PLAT-02B-PROVISIONING-WORKER-DESIGN.md`](docs/PLAT-02B-PROVISIONING-WORKER-DESIGN.md).
 - **PLAT-02C (núcleo durable del trabajador de aprovisionamiento):** adquisición atómica PostgreSQL con *lease* y *fencing* (`lease_version`), progreso durable por etapa, reintentos limitados con espera exponencial, migración incremental (`20261124070500_AddProvisioningWorkerLeaseAndStageProgress`) y host `Worker` separado de la API pública, deshabilitado por defecto y con adaptador `UnconfiguredProvisioningStageExecutor` (sin CloudNativePG, gRPC Identity, Clinical ni activación efectiva todavía).
+- **PLAT-03A (servidor gRPC de estado operativo Platform–Identity):** implementación de `TenantAccessService.GetTenantAccessState` sobre HTTP/2 (`h2c`, puerto candidato `8092`) separado del tráfico HTTP/1.1 (`8080`), autenticación `x-internal-service-key` en tiempo constante, cuota configurable por clínica (`max_active_accounts`, migración `20261124093133_AddTenantMaxActiveAccounts`) y fallo cerrado sin alterar el `.proto` v1 ni el modo `Worker`.
 - **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
   - **LAB-07:** `PASS LOCAL`.
   - **LAB-08:** `PASS LOCAL`.

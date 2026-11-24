@@ -11,12 +11,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.71.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.15" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.15">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="..\..\docs\contracts\proto\platform_identity\v1\platform_identity.proto"
+              GrpcServices="Server"
+              Link="Protos\platform_identity.proto" />
   </ItemGroup>
 
 </Project>

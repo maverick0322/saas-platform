@@ -9,7 +9,10 @@
 **/bin
 **/obj
 **/TestResults
-docs
+docs/*
+!docs/contracts
+docs/contracts/*
+!docs/contracts/proto
 tests
 *.md
 *.sln
