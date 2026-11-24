@@ -45,5 +45,11 @@ internal static class TenantDetailsMapper
                     operation.CreatedAtUtc,
                     operation.UpdatedAtUtc,
                     operation.LastAttemptAtUtc,
-                    operation.CompletedAtUtc));
+                    operation.CompletedAtUtc,
+                    operation.NextAttemptAtUtc,
+                    operation.ManualInterventionRequired,
+                    operation.InfrastructureStageState,
+                    operation.ServiceDatabasesStageState,
+                    operation.ClinicalStageState,
+                    operation.IdentityStageState));
 }

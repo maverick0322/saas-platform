@@ -24,6 +24,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         var pendingBefore = (await dbContext.Database.GetPendingMigrationsAsync(ct)).ToList();
         Assert.Contains("20261122180000_InitialTenantCatalog", pendingBefore);
         Assert.Contains("20261124053749_AddTenantOperationalStateAndProvisioningOperations", pendingBefore);
+        Assert.Contains("20261124070500_AddProvisioningWorkerLeaseAndStageProgress", pendingBefore);
 
         await dbContext.Database.MigrateAsync(ct);
 
@@ -32,6 +33,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
 
         Assert.Contains("20261122180000_InitialTenantCatalog", applied);
         Assert.Contains("20261124053749_AddTenantOperationalStateAndProvisioningOperations", applied);
+        Assert.Contains("20261124070500_AddProvisioningWorkerLeaseAndStageProgress", applied);
         Assert.Empty(pendingAfter);
         Assert.False(dbContext.Database.HasPendingModelChanges());
     }

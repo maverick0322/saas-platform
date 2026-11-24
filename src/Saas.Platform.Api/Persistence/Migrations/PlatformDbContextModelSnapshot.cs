@@ -97,6 +97,18 @@ namespace Saas.Platform.Api.Persistence.Migrations
                         .HasDefaultValue(0)
                         .HasColumnName("attempt_count");
 
+                    b.Property<string>("ClinicalMigrationVersion")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("clinical_migration_version");
+
+                    b.Property<string>("ClinicalStageState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("PENDING")
+                        .HasColumnName("clinical_stage_state");
+
                     b.Property<DateTimeOffset?>("CompletedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("completed_at_utc");
@@ -109,6 +121,30 @@ namespace Saas.Platform.Api.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at_utc");
+
+                    b.Property<string>("IdentityStageState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("PENDING")
+                        .HasColumnName("identity_stage_state");
+
+                    b.Property<string>("InfrastructureResourceRef")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("infrastructure_resource_ref");
+
+                    b.Property<string>("InfrastructureStageState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("PENDING")
+                        .HasColumnName("infrastructure_stage_state");
+
+                    b.Property<string>("InitialAdminAccountId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("initial_admin_account_id");
 
                     b.Property<string>("InitialAdminEmail")
                         .IsRequired()
@@ -136,11 +172,41 @@ namespace Saas.Platform.Api.Persistence.Migrations
                         .HasColumnType("character varying(500)")
                         .HasColumnName("last_error_summary");
 
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("lease_owner");
+
+                    b.Property<DateTimeOffset?>("LeaseUntilUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lease_until_utc");
+
+                    b.Property<long>("LeaseVersion")
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L)
+                        .HasColumnName("lease_version");
+
+                    b.Property<bool>("ManualInterventionRequired")
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("manual_intervention_required");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_attempt_at_utc");
+
                     b.Property<string>("ProvisioningRequestId")
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")
                         .HasColumnName("provisioning_request_id");
+
+                    b.Property<string>("ServiceDatabasesStageState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("PENDING")
+                        .HasColumnName("service_databases_stage_state");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -170,8 +236,13 @@ namespace Saas.Platform.Api.Persistence.Migrations
                     b.HasIndex("Status", "CreatedAtUtc")
                         .HasDatabaseName("ix_tenant_provisioning_operations_status_created_at_utc");
 
+                    b.HasIndex("Status", "ManualInterventionRequired", "NextAttemptAtUtc", "LeaseUntilUtc")
+                        .HasDatabaseName("ix_tenant_provisioning_operations_worker_acquisition");
+
                     b.ToTable("tenant_provisioning_operations", "platform", t =>
                         {
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_admin_acct_not_blank", "initial_admin_account_id IS NULL OR char_length(btrim(initial_admin_account_id)) > 0");
+
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_admin_email_not_empty", "char_length(btrim(initial_admin_email)) >= 3");
 
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_admin_name_length", "char_length(btrim(initial_admin_full_name)) >= 2");
@@ -180,13 +251,35 @@ namespace Saas.Platform.Api.Persistence.Migrations
 
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_attempt_timestamp_consistency", "(attempt_count = 0 AND last_attempt_at_utc IS NULL) OR (attempt_count > 0 AND last_attempt_at_utc IS NOT NULL)");
 
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_clinical_stage_state", "clinical_stage_state IN ('PENDING', 'VERIFICATION_REQUIRED', 'CONFIRMED')");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_clinical_ver_not_blank", "clinical_migration_version IS NULL OR char_length(btrim(clinical_migration_version)) > 0");
+
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_completed_at_consistency", "(status = 'COMPLETED' AND completed_at_utc IS NOT NULL) OR (status <> 'COMPLETED' AND completed_at_utc IS NULL)");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_identity_stage_state", "identity_stage_state IN ('PENDING', 'VERIFICATION_REQUIRED', 'CONFIRMED')");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_in_progress_has_lease", "status <> 'IN_PROGRESS' OR (lease_owner IS NOT NULL AND lease_until_utc IS NOT NULL)");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_infra_ref_not_blank", "infrastructure_resource_ref IS NULL OR char_length(btrim(infrastructure_resource_ref)) > 0");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_infrastructure_stage_state", "infrastructure_stage_state IN ('PENDING', 'VERIFICATION_REQUIRED', 'CONFIRMED')");
 
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_last_error_code_not_blank", "last_error_code IS NULL OR char_length(btrim(last_error_code)) > 0");
 
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_last_error_summary_not_blank", "last_error_summary IS NULL OR char_length(btrim(last_error_summary)) > 0");
 
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_lease_consistency", "(lease_owner IS NULL AND lease_until_utc IS NULL) OR (lease_owner IS NOT NULL AND char_length(btrim(lease_owner)) > 0 AND lease_until_utc IS NOT NULL)");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_lease_version_non_negative", "lease_version >= 0");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_next_attempt_status", "next_attempt_at_utc IS NULL OR status = 'FAILED_RETRYABLE'");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_non_in_progress_no_lease", "status = 'IN_PROGRESS' OR (lease_owner IS NULL AND lease_until_utc IS NULL)");
+
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_request_id_not_empty", "char_length(btrim(provisioning_request_id)) >= 8");
+
+                            t.HasCheckConstraint("ck_tenant_provisioning_operations_service_databases_stage_state", "service_databases_stage_state IN ('PENDING', 'VERIFICATION_REQUIRED', 'CONFIRMED')");
 
                             t.HasCheckConstraint("ck_tenant_provisioning_operations_status", "status IN ('PENDING', 'IN_PROGRESS', 'FAILED_RETRYABLE', 'FAILED_TERMINAL', 'COMPLETED')");
                         });

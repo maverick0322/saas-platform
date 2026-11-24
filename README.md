@@ -29,7 +29,7 @@ Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md), [`ADR-0002`](doc
 
 Estados operativos del tenant (`PENDIENTE_ADMIN`, `ACTIVA`, `SUSPENDIDA`) incorporados en el modelo de dominio y catálogo global de **PLAT-02A** (toda clínica inicia en `PENDIENTE_ADMIN`). `Identity READY` es **necesario pero no suficiente** para pasar a `ACTIVA` (`ADR-0002` / `ADR-0003`); la activación efectiva, el trabajador de aprovisionamiento y la integración gRPC siguen fuera de alcance hasta sus incrementos aprobados.
 
-## Estructura actual (PLAT-02A)
+## Estructura actual (PLAT-02C)
 
 ```text
 Saas.Platform.sln
@@ -38,12 +38,21 @@ src/
     Domain/
       AdministrativeValidation.cs
       ProvisioningOperationStatus.cs
+      ProvisioningStage.cs
+      ProvisioningStageState.cs
       Tenant.cs
       TenantActivationPrerequisites.cs
       TenantOperationalState.cs
       TenantProvisioningOperation.cs
       TenantValidationError.cs
     Features/
+      Provisioning/
+        IProvisioningStageExecutor.cs
+        ProvisioningLeaseStore.cs
+        ProvisioningOperationProcessor.cs
+        ProvisioningWorkerHostedService.cs
+        ProvisioningWorkerOptions.cs
+        UnconfiguredProvisioningStageExecutor.cs
       Tenants/
         GetTenantById/
           GetTenantByIdHandler.cs
@@ -63,9 +72,12 @@ src/
         20261122180000_InitialTenantCatalog.Designer.cs
         20261124053749_AddTenantOperationalStateAndProvisioningOperations.cs
         20261124053749_AddTenantOperationalStateAndProvisioningOperations.Designer.cs
+        20261124070500_AddProvisioningWorkerLeaseAndStageProgress.cs
+        20261124070500_AddProvisioningWorkerLeaseAndStageProgress.Designer.cs
         PlatformDbContextModelSnapshot.cs
       PlatformDbContext.cs
       PlatformDbContextFactory.cs
+    PlatformHostFactory.cs
     Program.cs
     Saas.Platform.Api.csproj
     appsettings.json
@@ -74,7 +86,10 @@ src/
 tests/
   Saas.Platform.Tests/
     HealthEndpointsTests.cs
+    MutableTimeProvider.cs
     PostgreSqlFixture.cs
+    ProvisioningWorkerCoreTests.cs
+    ProvisioningWorkerIntegrationTests.cs
     TenantCatalogIntegrationTests.cs
     TenantDomainValidationTests.cs
     TenantProvisioningIntegrationTests.cs
@@ -84,7 +99,13 @@ Dockerfile
 .github/workflows/ci.yml
 ```
 
-Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 / PLAT-02A porque la autenticación definitiva de SuperAdmin y los contratos con Identity siguen pendientes de ratificación; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
+Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 / PLAT-02A / PLAT-02C porque la autenticación definitiva de SuperAdmin y los contratos con Identity siguen pendientes de ratificación; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
+
+### Modo trabajador separado (`PLAT-02C`)
+
+El mismo binario/imagen de Platform soporta dos modos explícitos mediante `Platform:RuntimeMode` (`Platform__RuntimeMode`) o `--mode=api` / `--mode=worker`:
+- **`Api` (por defecto):** expone únicamente los endpoints técnicos HTTP (`/health/live`, `/health/ready`); **no** registra ni ejecuta `ProvisioningWorkerHostedService`.
+- **`Worker`:** ejecuta un `IHost` genérico sin servidor HTTP con el núcleo durable del trabajador (`ProvisioningWorkerHostedService`). Por seguridad, `ProvisioningWorker:Enabled` está en `false` por defecto y en producción únicamente se registra `UnconfiguredProvisioningStageExecutor` (`SupportsRealProvisioning = false`), por lo que no realiza aprovisionamiento real ni modifica clínicas hasta conectar adaptadores reales y contratos ratificados.
 
 ## Prerrequisitos
 
@@ -133,8 +154,8 @@ curl -i http://localhost:8080/health/ready
 `tests/Saas.Platform.Tests/` incluye:
 
 - **Pruebas HTTP técnicas y de seguridad (`HealthEndpointsTests`):** ejecutan `Program` en memoria mediante `WebApplicationFactory<Program>` sin requerir PostgreSQL ni Kubernetes; verifican `/health/live`, `/health/ready`, `404` ante rutas inexistentes y la ausencia de endpoints administrativos anónimos.
-- **Pruebas unitarias de dominio (`TenantDomainValidationTests`):** verifican normalización, invariantes administrativas de `Tenant`, prerequisitos de activación (`CanActivate`), invariantes de `TenantProvisioningOperation` y sanitización de diagnósticos sin secretos.
-- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`, `TenantProvisioningIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migraciones reproducibles sobre base vacía y sobre esquema PLAT-01 previo, persistencia atómica ACID de tenant + operación, recuperación tras recrear `PlatformDbContext`, unicidad de `public_id` / `tenant_id` / `provisioning_request_id`, concurrencia de altas duplicadas, concurrencia optimista (`DbUpdateConcurrencyException`), registro de error recuperable sin secretos y restricciones `CHECK` / `FK` en PostgreSQL.
+- **Pruebas unitarias de dominio y trabajador (`TenantDomainValidationTests`, `ProvisioningWorkerCoreTests`):** verifican normalización, invariantes administrativas de `Tenant`, prerequisitos de activación (`CanActivate`), invariantes de `TenantProvisioningOperation`, sanitización de diagnósticos sin secretos/JWT/cadenas de conexión, configuración/backoff del trabajador y separación segura entre modos `Api` y `Worker`.
+- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`, `TenantProvisioningIntegrationTests`, `ProvisioningWorkerIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migraciones reproducibles sobre base vacía y sobre esquemas PLAT-01/PLAT-02A previos, persistencia atómica ACID de tenant + operación, adquisición atómica con `FOR UPDATE SKIP LOCKED`, exclusión concurrente, renovación periódica de *lease* durante etapas prolongadas, cancelación y rechazo de escrituras obsoletas (*fencing*) al perder el *lease*, recuperación conservadora (`VERIFICATION_REQUIRED`) tras caídas sin duplicar efectos externos, conteo exacto de intentos iniciados, reintentos limitados con espera exponencial, errores transitorios/terminales, rechazo de evidencia simulada y ausencia de activaciones falsas.
 
 ```bash
 # Ejecutar toda la suite (requiere .NET 10 SDK y Docker activo para Testcontainers)
@@ -189,6 +210,8 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **PLAT-00 (documental, integrado en `develop` vía PR #7):** formalización de arquitectura multitenant ([`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md)) y de consistencia transaccional y aprovisionamiento ([`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md)).
 - **PLAT-01 (catálogo global y persistencia de Platform):** `PlatformDbContext` global con EF Core + PostgreSQL, migración inicial versionada (`20261122180000_InitialTenantCatalog`), vertical slices internos (`RegisterTenant`, `GetTenantById`) y pruebas de integración con Testcontainers. Rutas HTTP administrativas diferidas hasta ratificar autenticación de SuperAdmin y contratos con Identity.
 - **PLAT-02A (estados operativos y aprovisionamiento durable):** estados `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA` en `Tenant` (inicio obligatorio en `PENDIENTE_ADMIN` y bloqueo de activación sin prerrequisitos completos), entidad durable `TenantProvisioningOperation` con `provisioning_request_id` estable, migración versionada incremental (`20261124053749_AddTenantOperationalStateAndProvisioningOperations`), registro atómico ACID y representación administrativa preparada en `GetTenantById` (sin trabajador, CloudNativePG, llamadas gRPC, activación efectiva ni rutas administrativas anónimas).
+- **PLAT-02B (diseño del trabajador y contratos mínimos, PR #12):** especificación lógica de arrendamiento, recuperación, reintentos y contratos mínimos en [`docs/PLAT-02B-PROVISIONING-WORKER-DESIGN.md`](docs/PLAT-02B-PROVISIONING-WORKER-DESIGN.md).
+- **PLAT-02C (núcleo durable del trabajador de aprovisionamiento):** adquisición atómica PostgreSQL con *lease* y *fencing* (`lease_version`), progreso durable por etapa, reintentos limitados con espera exponencial, migración incremental (`20261124070500_AddProvisioningWorkerLeaseAndStageProgress`) y host `Worker` separado de la API pública, deshabilitado por defecto y con adaptador `UnconfiguredProvisioningStageExecutor` (sin CloudNativePG, gRPC Identity, Clinical ni activación efectiva todavía).
 - **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
   - **LAB-07:** `PASS LOCAL`.
   - **LAB-08:** `PASS LOCAL`.

@@ -18,4 +18,10 @@ public sealed record TenantProvisioningSummary(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? LastAttemptAtUtc,
-    DateTimeOffset? CompletedAtUtc);
+    DateTimeOffset? CompletedAtUtc,
+    DateTimeOffset? NextAttemptAtUtc = null,
+    bool ManualInterventionRequired = false,
+    ProvisioningStageState InfrastructureStage = ProvisioningStageState.Pending,
+    ProvisioningStageState ServiceDatabasesStage = ProvisioningStageState.Pending,
+    ProvisioningStageState ClinicalStage = ProvisioningStageState.Pending,
+    ProvisioningStageState IdentityStage = ProvisioningStageState.Pending);
