@@ -1,6 +1,9 @@
 using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Saas.Platform.Api.Features.Provisioning;
 using Xunit;
 
 namespace Saas.Platform.Tests;
@@ -76,5 +79,12 @@ public sealed class HealthEndpointsTests(WebApplicationFactory<Program> factory)
         var response = await _client.SendAsync(request, ct);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public void PublicApiHost_DoesNotRegisterProvisioningWorkerHostedService()
+    {
+        var hostedServices = factory.Services.GetServices<IHostedService>();
+        Assert.DoesNotContain(hostedServices, service => service is ProvisioningWorkerHostedService);
     }
 }

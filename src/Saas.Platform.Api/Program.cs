@@ -2,9 +2,17 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Saas.Platform.Api;
 using Saas.Platform.Api.Features.Tenants.GetTenantById;
 using Saas.Platform.Api.Features.Tenants.RegisterTenant;
 using Saas.Platform.Api.Persistence;
+
+if (PlatformHostFactory.ResolveRuntimeMode(args) == PlatformRuntimeMode.Worker)
+{
+    using var workerHost = PlatformHostFactory.CreateWorkerHost(args);
+    await workerHost.RunAsync();
+    return;
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -37,6 +45,7 @@ var app = builder.Build();
 
 // Technical health endpoints only. Administrative tenant HTTP endpoints are intentionally
 // deferred until SuperAdmin authentication and Identity contracts are ratified (PLAT-01 / PLAT-02A).
+// ProvisioningWorkerHostedService is intentionally excluded from the public API host (ADR-0003).
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("live"),

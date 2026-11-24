@@ -45,6 +45,57 @@ internal sealed class TenantProvisioningOperationConfiguration : IEntityTypeConf
             tableBuilder.HasCheckConstraint(
                 "ck_tenant_provisioning_operations_completed_at_consistency",
                 $"(status = '{ProvisioningOperationStatusExtensions.CompletedCode}' AND completed_at_utc IS NOT NULL) OR (status <> '{ProvisioningOperationStatusExtensions.CompletedCode}' AND completed_at_utc IS NULL)");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_lease_version_non_negative",
+                "lease_version >= 0");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_lease_consistency",
+                "(lease_owner IS NULL AND lease_until_utc IS NULL) OR (lease_owner IS NOT NULL AND char_length(btrim(lease_owner)) > 0 AND lease_until_utc IS NOT NULL)");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_in_progress_has_lease",
+                $"status <> '{ProvisioningOperationStatusExtensions.InProgressCode}' OR (lease_owner IS NOT NULL AND lease_until_utc IS NOT NULL)");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_non_in_progress_no_lease",
+                $"status = '{ProvisioningOperationStatusExtensions.InProgressCode}' OR (lease_owner IS NULL AND lease_until_utc IS NULL)");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_next_attempt_status",
+                $"next_attempt_at_utc IS NULL OR status = '{ProvisioningOperationStatusExtensions.FailedRetryableCode}'");
+
+            var stageValuesSql =
+                $"('{ProvisioningStageStateExtensions.PendingCode}', '{ProvisioningStageStateExtensions.VerificationRequiredCode}', '{ProvisioningStageStateExtensions.ConfirmedCode}')";
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_infrastructure_stage_state",
+                $"infrastructure_stage_state IN {stageValuesSql}");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_service_databases_stage_state",
+                $"service_databases_stage_state IN {stageValuesSql}");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_clinical_stage_state",
+                $"clinical_stage_state IN {stageValuesSql}");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_identity_stage_state",
+                $"identity_stage_state IN {stageValuesSql}");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_infra_ref_not_blank",
+                "infrastructure_resource_ref IS NULL OR char_length(btrim(infrastructure_resource_ref)) > 0");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_clinical_ver_not_blank",
+                "clinical_migration_version IS NULL OR char_length(btrim(clinical_migration_version)) > 0");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenant_provisioning_operations_admin_acct_not_blank",
+                "initial_admin_account_id IS NULL OR char_length(btrim(initial_admin_account_id)) > 0");
         });
 
         builder.HasKey(operation => operation.Id)
@@ -114,6 +165,45 @@ internal sealed class TenantProvisioningOperationConfiguration : IEntityTypeConf
             .IsConcurrencyToken()
             .IsRequired();
 
+        builder.Property(operation => operation.LeaseOwner)
+            .HasColumnName("lease_owner")
+            .HasMaxLength(TenantProvisioningOperation.LeaseOwnerMaxLength);
+
+        builder.Property(operation => operation.LeaseUntilUtc)
+            .HasColumnName("lease_until_utc");
+
+        builder.Property(operation => operation.LeaseVersion)
+            .HasColumnName("lease_version")
+            .HasDefaultValue(0L)
+            .ValueGeneratedNever()
+            .IsRequired();
+
+        builder.Property(operation => operation.NextAttemptAtUtc)
+            .HasColumnName("next_attempt_at_utc");
+
+        builder.Property(operation => operation.ManualInterventionRequired)
+            .HasColumnName("manual_intervention_required")
+            .HasDefaultValue(false)
+            .ValueGeneratedNever()
+            .IsRequired();
+
+        ConfigureStageProperty(builder.Property(operation => operation.InfrastructureStageState), "infrastructure_stage_state");
+        ConfigureStageProperty(builder.Property(operation => operation.ServiceDatabasesStageState), "service_databases_stage_state");
+        ConfigureStageProperty(builder.Property(operation => operation.ClinicalStageState), "clinical_stage_state");
+        ConfigureStageProperty(builder.Property(operation => operation.IdentityStageState), "identity_stage_state");
+
+        builder.Property(operation => operation.InfrastructureResourceRef)
+            .HasColumnName("infrastructure_resource_ref")
+            .HasMaxLength(TenantProvisioningOperation.TechnicalReferenceMaxLength);
+
+        builder.Property(operation => operation.ClinicalMigrationVersion)
+            .HasColumnName("clinical_migration_version")
+            .HasMaxLength(TenantProvisioningOperation.TechnicalReferenceMaxLength);
+
+        builder.Property(operation => operation.InitialAdminAccountId)
+            .HasColumnName("initial_admin_account_id")
+            .HasMaxLength(TenantProvisioningOperation.TechnicalReferenceMaxLength);
+
         builder.HasOne<Tenant>()
             .WithOne()
             .HasForeignKey<TenantProvisioningOperation>(operation => operation.TenantId)
@@ -130,5 +220,29 @@ internal sealed class TenantProvisioningOperationConfiguration : IEntityTypeConf
 
         builder.HasIndex(operation => new { operation.Status, operation.CreatedAtUtc })
             .HasDatabaseName("ix_tenant_provisioning_operations_status_created_at_utc");
+
+        builder.HasIndex(operation => new
+        {
+            operation.Status,
+            operation.ManualInterventionRequired,
+            operation.NextAttemptAtUtc,
+            operation.LeaseUntilUtc
+        })
+            .HasDatabaseName("ix_tenant_provisioning_operations_worker_acquisition");
+    }
+
+    private static void ConfigureStageProperty(
+        PropertyBuilder<ProvisioningStageState> propertyBuilder,
+        string columnName)
+    {
+        propertyBuilder
+            .HasColumnName(columnName)
+            .HasMaxLength(TenantProvisioningOperation.StageStateMaxLength)
+            .HasConversion(
+                state => state.ToCode(),
+                code => ProvisioningStageStateExtensions.ParseCode(code))
+            .HasDefaultValue(ProvisioningStageState.Pending)
+            .ValueGeneratedNever()
+            .IsRequired();
     }
 }

@@ -4,8 +4,8 @@ namespace Saas.Platform.Api.Domain;
 
 /// <summary>
 /// Intención durable y reintentable de aprovisionamiento inicial para una clínica en la base global de Platform.
-/// Conserva su identificador de solicitud (<see cref="ProvisioningRequestId"/>) y los datos del administrador inicial
-/// de forma estable entre reintentos para preservar la idempotencia con Identity.
+/// Conserva su identificador de solicitud (<see cref="ProvisioningRequestId"/>), los datos del administrador inicial,
+/// el arrendamiento (lease + fencing) y el progreso por etapa entre reintentos.
 /// </summary>
 public sealed partial class TenantProvisioningOperation
 {
@@ -17,6 +17,9 @@ public sealed partial class TenantProvisioningOperation
     public const int LastErrorCodeMinLength = 2;
     public const int LastErrorCodeMaxLength = 64;
     public const int LastErrorSummaryMaxLength = 500;
+    public const int LeaseOwnerMaxLength = 128;
+    public const int StageStateMaxLength = 32;
+    public const int TechnicalReferenceMaxLength = 128;
 
     private TenantProvisioningOperation()
     {
@@ -38,6 +41,12 @@ public sealed partial class TenantProvisioningOperation
         InitialAdminEmail = initialAdminEmail;
         Status = ProvisioningOperationStatus.Pending;
         AttemptCount = 0;
+        LeaseVersion = 0;
+        ManualInterventionRequired = false;
+        InfrastructureStageState = ProvisioningStageState.Pending;
+        ServiceDatabasesStageState = ProvisioningStageState.Pending;
+        ClinicalStageState = ProvisioningStageState.Pending;
+        IdentityStageState = ProvisioningStageState.Pending;
         CreatedAtUtc = createdAtUtc;
         UpdatedAtUtc = createdAtUtc;
         ConcurrencyStamp = concurrencyStamp;
@@ -70,6 +79,52 @@ public sealed partial class TenantProvisioningOperation
     public DateTimeOffset? CompletedAtUtc { get; private set; }
 
     public Guid ConcurrencyStamp { get; private set; }
+
+    public string? LeaseOwner { get; private set; }
+
+    public DateTimeOffset? LeaseUntilUtc { get; private set; }
+
+    public long LeaseVersion { get; private set; }
+
+    public DateTimeOffset? NextAttemptAtUtc { get; private set; }
+
+    public bool ManualInterventionRequired { get; private set; }
+
+    public ProvisioningStageState InfrastructureStageState { get; private set; } = ProvisioningStageState.Pending;
+
+    public ProvisioningStageState ServiceDatabasesStageState { get; private set; } = ProvisioningStageState.Pending;
+
+    public ProvisioningStageState ClinicalStageState { get; private set; } = ProvisioningStageState.Pending;
+
+    public ProvisioningStageState IdentityStageState { get; private set; } = ProvisioningStageState.Pending;
+
+    public string? InfrastructureResourceRef { get; private set; }
+
+    public string? ClinicalMigrationVersion { get; private set; }
+
+    public string? InitialAdminAccountId { get; private set; }
+
+    public ProvisioningStageState GetStageState(ProvisioningStage stage) => stage switch
+    {
+        ProvisioningStage.InfrastructureInstance => InfrastructureStageState,
+        ProvisioningStage.ServiceDatabases => ServiceDatabasesStageState,
+        ProvisioningStage.ClinicalPreparation => ClinicalStageState,
+        ProvisioningStage.IdentityPreparation => IdentityStageState,
+        _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "Unsupported provisioning stage.")
+    };
+
+    public ProvisioningStage? GetNextPendingStage()
+    {
+        foreach (var stage in ProvisioningStageExtensions.OrderedStages)
+        {
+            if (GetStageState(stage) != ProvisioningStageState.Confirmed)
+            {
+                return stage;
+            }
+        }
+
+        return null;
+    }
 
     public static bool TryValidateInitialAdmin(
         string? initialAdminFullName,
@@ -176,6 +231,33 @@ public sealed partial class TenantProvisioningOperation
                 $"Cannot record a failure when provisioning operation is already in '{Status.ToCode()}' status.");
         }
 
+        var normalizedCode = NormalizeErrorCode(errorCode);
+        var sanitizedSummary = SanitizeDiagnosticSummary(errorSummary);
+        var utcNow = occurredAtUtc.ToUniversalTime();
+
+        if (Status != ProvisioningOperationStatus.InProgress)
+        {
+            AttemptCount++;
+        }
+
+        Status = targetStatus;
+        LeaseOwner = null;
+        LeaseUntilUtc = null;
+        if (targetStatus == ProvisioningOperationStatus.FailedTerminal)
+        {
+            NextAttemptAtUtc = null;
+            ManualInterventionRequired = true;
+        }
+
+        LastErrorCode = normalizedCode;
+        LastErrorSummary = sanitizedSummary;
+        LastAttemptAtUtc = utcNow;
+        UpdatedAtUtc = utcNow;
+        ConcurrencyStamp = Guid.NewGuid();
+    }
+
+    internal static string NormalizeErrorCode(string errorCode)
+    {
         var normalizedCode = errorCode?.Trim().ToUpperInvariant() ?? string.Empty;
         if (!ErrorCodeRegex().IsMatch(normalizedCode))
         {
@@ -184,19 +266,10 @@ public sealed partial class TenantProvisioningOperation
                 nameof(errorCode));
         }
 
-        var sanitizedSummary = SanitizeDiagnosticSummary(errorSummary);
-        var utcNow = occurredAtUtc.ToUniversalTime();
-
-        Status = targetStatus;
-        AttemptCount++;
-        LastErrorCode = normalizedCode;
-        LastErrorSummary = sanitizedSummary;
-        LastAttemptAtUtc = utcNow;
-        UpdatedAtUtc = utcNow;
-        ConcurrencyStamp = Guid.NewGuid();
+        return normalizedCode;
     }
 
-    private static string SanitizeDiagnosticSummary(string summary)
+    internal static string SanitizeDiagnosticSummary(string summary)
     {
         if (string.IsNullOrWhiteSpace(summary))
         {
@@ -212,7 +285,9 @@ public sealed partial class TenantProvisioningOperation
             throw new ArgumentException("Error summary must contain printable text.", nameof(summary));
         }
 
-        var redacted = BearerSecretRegex().Replace(normalizedWhitespace, "Bearer [REDACTED]");
+        var redacted = ConnectionStringRegex().Replace(normalizedWhitespace, "[REDACTED_CONNECTION_STRING]");
+        redacted = JwtTokenRegex().Replace(redacted, "[REDACTED_JWT]");
+        redacted = BearerSecretRegex().Replace(redacted, "Bearer [REDACTED]");
         redacted = KeyValueSecretRegex().Replace(redacted, "${key}=[REDACTED]");
 
         return redacted.Length <= LastErrorSummaryMaxLength
@@ -220,11 +295,50 @@ public sealed partial class TenantProvisioningOperation
             : redacted[..LastErrorSummaryMaxLength];
     }
 
+    internal static string? SanitizeTechnicalReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim();
+        if (trimmed.Length > TechnicalReferenceMaxLength)
+        {
+            throw new ArgumentException(
+                $"Technical reference must not exceed {TechnicalReferenceMaxLength} characters.",
+                nameof(value));
+        }
+
+        if (AdministrativeValidation.ContainsControlCharacters(trimmed)
+            || ConnectionStringRegex().IsMatch(trimmed)
+            || JwtTokenRegex().IsMatch(trimmed)
+            || BearerSecretRegex().IsMatch(trimmed)
+            || KeyValueSecretRegex().IsMatch(trimmed))
+        {
+            throw new ArgumentException(
+                "Technical reference contains disallowed control characters or sensitive patterns.",
+                nameof(value));
+        }
+
+        return trimmed;
+    }
+
     [GeneratedRegex("^[A-Z0-9_-]{2,64}$", RegexOptions.CultureInvariant)]
     private static partial Regex ErrorCodeRegex();
 
     [GeneratedRegex("[\\p{C}\\s]+", RegexOptions.CultureInvariant)]
     private static partial Regex ControlOrWhitespaceRunRegex();
+
+    [GeneratedRegex(
+        "(?:Host|Server)\\s*=\\s*[^;\\s]+(?:\\s*;\\s*[A-Za-z_]+\\s*=\\s*[^;\\s]*)+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ConnectionStringRegex();
+
+    [GeneratedRegex(
+        "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex JwtTokenRegex();
 
     [GeneratedRegex("Bearer\\s+\\S+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex BearerSecretRegex();
