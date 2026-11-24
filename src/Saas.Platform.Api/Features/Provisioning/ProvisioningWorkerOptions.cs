@@ -31,6 +31,9 @@ public sealed class ProvisioningWorkerOptions
 
     public TimeSpan LeaseDuration => TimeSpan.FromSeconds(LeaseDurationSeconds);
 
+    public TimeSpan LeaseRenewalInterval =>
+        TimeSpan.FromMilliseconds(Math.Max(100, LeaseDuration.TotalMilliseconds / 3.0));
+
     public TimeSpan PollInterval => TimeSpan.FromSeconds(PollIntervalSeconds);
 
     public string ResolveWorkerId() =>

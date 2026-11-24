@@ -80,23 +80,6 @@ public sealed class ProvisioningOperationProcessor(
                 continue;
             }
 
-            var beforeStageUtc = timeProvider.GetUtcNow().ToUniversalTime();
-            if (current.LeaseUntilUtc - beforeStageUtc <= options.LeaseDuration / 2)
-            {
-                var renewed = await leaseStore.TryRenewLeaseAsync(
-                    current.Token,
-                    beforeStageUtc,
-                    options.LeaseDuration,
-                    cancellationToken);
-
-                if (!renewed)
-                {
-                    return LogAndReturnLeaseLost(current, stage);
-                }
-
-                current = current with { LeaseUntilUtc = beforeStageUtc.Add(options.LeaseDuration) };
-            }
-
             var context = new ProvisioningStageContext(
                 OperationId: current.Token.OperationId,
                 TenantId: current.TenantId,
@@ -112,7 +95,53 @@ public sealed class ProvisioningOperationProcessor(
                 ClinicalMigrationVersion: current.ClinicalMigrationVersion,
                 InitialAdminAccountId: current.InitialAdminAccountId);
 
-            var stageResult = await stageExecutor.ExecuteStageAsync(context, cancellationToken);
+            using var stageCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var renewalStopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            var leaseLostFlag = 0;
+            var lastKnownLeaseUntilTicks = current.LeaseUntilUtc.UtcTicks;
+
+            var renewalTask = RunLeaseRenewalLoopAsync(
+                current.Token,
+                options.LeaseDuration,
+                options.LeaseRenewalInterval,
+                stageCts,
+                () => Volatile.Write(ref leaseLostFlag, 1),
+                renewedUntilUtc => Interlocked.Exchange(ref lastKnownLeaseUntilTicks, renewedUntilUtc.UtcTicks),
+                () => Interlocked.Read(ref lastKnownLeaseUntilTicks),
+                renewalStopCts.Token);
+
+            ProvisioningStageResult stageResult;
+            try
+            {
+                stageResult = await stageExecutor.ExecuteStageAsync(context, stageCts.Token);
+            }
+            catch (OperationCanceledException) when (Volatile.Read(ref leaseLostFlag) == 1 && !cancellationToken.IsCancellationRequested)
+            {
+                return LogAndReturnLeaseLost(current, stage);
+            }
+            finally
+            {
+                await renewalStopCts.CancelAsync();
+                try
+                {
+                    await renewalTask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            if (Volatile.Read(ref leaseLostFlag) == 1)
+            {
+                return LogAndReturnLeaseLost(current, stage);
+            }
+
+            current = current with
+            {
+                LeaseUntilUtc = new DateTimeOffset(Interlocked.Read(ref lastKnownLeaseUntilTicks), TimeSpan.Zero)
+            };
+
             var afterStageUtc = timeProvider.GetUtcNow().ToUniversalTime();
 
             switch (stageResult.Outcome)
@@ -326,5 +355,59 @@ public sealed class ProvisioningOperationProcessor(
             current.Token.LeaseVersion,
             current.AttemptCount,
             stage);
+    }
+
+    private async Task RunLeaseRenewalLoopAsync(
+        ProvisioningLeaseToken token,
+        TimeSpan leaseDuration,
+        TimeSpan renewalInterval,
+        CancellationTokenSource stageCts,
+        Action markLeaseLost,
+        Action<DateTimeOffset> updateLeaseUntil,
+        Func<long> getLastKnownLeaseUntilTicks,
+        CancellationToken renewalStopToken)
+    {
+        using var timer = new PeriodicTimer(renewalInterval, timeProvider);
+        while (await timer.WaitForNextTickAsync(renewalStopToken))
+        {
+            var nowUtc = timeProvider.GetUtcNow().ToUniversalTime();
+            try
+            {
+                var renewed = await leaseStore.TryRenewLeaseAsync(
+                    token,
+                    nowUtc,
+                    leaseDuration,
+                    renewalStopToken);
+
+                if (renewed)
+                {
+                    updateLeaseUntil(nowUtc.Add(leaseDuration));
+                    continue;
+                }
+
+                markLeaseLost();
+                await stageCts.CancelAsync();
+                return;
+            }
+            catch (OperationCanceledException) when (renewalStopToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Transient error renewing lease for operation {OperationId} (leaseVersion={LeaseVersion}).",
+                    token.OperationId,
+                    token.LeaseVersion);
+
+                if (timeProvider.GetUtcNow().ToUniversalTime().UtcTicks >= getLastKnownLeaseUntilTicks())
+                {
+                    markLeaseLost();
+                    await stageCts.CancelAsync();
+                    return;
+                }
+            }
+        }
     }
 }

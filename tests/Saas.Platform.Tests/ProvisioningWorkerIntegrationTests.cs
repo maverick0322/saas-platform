@@ -123,6 +123,7 @@ public sealed class ProvisioningWorkerIntegrationTests(PostgreSqlFixture fixture
         Assert.Equal("worker-b", leaseB.Token.LeaseOwner);
         Assert.Equal(2, leaseB.Token.LeaseVersion);
         Assert.Equal(2, leaseB.AttemptCount);
+        Assert.Equal(ProvisioningStageState.VerificationRequired, leaseB.InfrastructureStageState);
 
         // Worker B confirms Stage 1.
         Assert.True(await storeB.TryRecordStageConfirmedAsync(
@@ -282,6 +283,7 @@ public sealed class ProvisioningWorkerIntegrationTests(PostgreSqlFixture fixture
         Assert.True(op.ManualInterventionRequired);
         Assert.Null(op.LeaseOwner);
         Assert.Null(op.LeaseUntilUtc);
+        Assert.Equal(ProvisioningStageState.VerificationRequired, op.InfrastructureStageState);
         Assert.Equal("RETRIES_EXHAUSTED_LEASE_EXPIRED", op.LastErrorCode);
     }
 
@@ -552,6 +554,250 @@ public sealed class ProvisioningWorkerIntegrationTests(PostgreSqlFixture fixture
         Assert.Equal(existingReqId, acquired.ProvisioningRequestId);
     }
 
+    [Fact]
+    public async Task LongRunningStageExceedingOriginalLease_RenewsLeaseAndPreventsSecondWorkerTakeover()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var dbConnectionString = await CreateMigratedIsolatedDatabaseAsync("long_renew", ct);
+
+        var created = await RegisterSyntheticTenantAsync(dbConnectionString, "clinica-long-stage", TimeProvider.System, ct);
+        var opId = created.InitialProvisioning!.OperationId;
+
+        var options = new ProvisioningWorkerOptions
+        {
+            Enabled = true,
+            MaxAutomaticRetries = 3,
+            LeaseDurationSeconds = 1
+        };
+
+        var stageStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowStageCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var executor = new ScriptedProvisioningStageExecutor(async (ctx, stageToken) =>
+        {
+            if (ctx.Stage == ProvisioningStage.InfrastructureInstance)
+            {
+                stageStarted.TrySetResult();
+                await allowStageCompletion.Task.WaitAsync(stageToken);
+                return new ProvisioningStageResult(
+                    ProvisioningStageOutcomeKind.StageVerified,
+                    TechnicalReference: "cnpg-clinica-long-stage");
+            }
+
+            return new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.TransientFailure,
+                ErrorCode: "DEFER_NEXT_STAGE",
+                ErrorSummary: "Defer remaining stages after confirming long-running stage.");
+        });
+
+        var worker1Task = RunSingleCycleAsync(dbConnectionString, executor, TimeProvider.System, options, "worker-long-1", ct);
+        await stageStarted.Task.WaitAsync(ct);
+
+        // Wait strictly past the 1s original lease while worker-long-1 is still executing Stage 1.
+        await Task.Delay(TimeSpan.FromMilliseconds(1350), ct);
+
+        await using (var worker2Context = fixture.CreateDbContext(dbConnectionString))
+        {
+            var store2 = new ProvisioningLeaseStore(worker2Context);
+            var takeoverAttempt = await store2.TryAcquireNextAsync(
+                "worker-long-2",
+                TimeProvider.System.GetUtcNow(),
+                options.LeaseDuration,
+                options.MaxTotalAttempts,
+                ct);
+
+            Assert.Null(takeoverAttempt);
+        }
+
+        allowStageCompletion.TrySetResult();
+        var cycleResult = await worker1Task;
+
+        Assert.Equal(ProvisioningCycleOutcome.DeferredRetry, cycleResult.Outcome);
+        Assert.Equal(1, cycleResult.LeaseVersion);
+        Assert.Equal(1, cycleResult.AttemptCount);
+
+        await using var verifyContext = fixture.CreateDbContext(dbConnectionString);
+        var op = await verifyContext.TenantProvisioningOperations.SingleAsync(o => o.Id == opId, ct);
+        var tenant = await verifyContext.Tenants.SingleAsync(t => t.Id == created.Id, ct);
+        Assert.Equal(ProvisioningStageState.Confirmed, op.InfrastructureStageState);
+        Assert.Equal("cnpg-clinica-long-stage", op.InfrastructureResourceRef);
+        Assert.Equal(1, op.LeaseVersion);
+        Assert.Equal(1, op.AttemptCount);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+    }
+
+    [Fact]
+    public async Task LeaseLostDuringStageExecution_CancelsStageAndDoesNotPersistStaleResult()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var dbConnectionString = await CreateMigratedIsolatedDatabaseAsync("lease_lost_cancel", ct);
+
+        var created = await RegisterSyntheticTenantAsync(dbConnectionString, "clinica-lose-lease", TimeProvider.System, ct);
+        var opId = created.InitialProvisioning!.OperationId;
+
+        var options = new ProvisioningWorkerOptions
+        {
+            Enabled = true,
+            MaxAutomaticRetries = 3,
+            LeaseDurationSeconds = 1
+        };
+
+        var stageStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stageCanceledObserved = false;
+
+        var executor = new ScriptedProvisioningStageExecutor(async (ctx, stageToken) =>
+        {
+            stageStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), stageToken);
+            }
+            catch (OperationCanceledException) when (stageToken.IsCancellationRequested)
+            {
+                stageCanceledObserved = true;
+                throw;
+            }
+
+            return new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.StageVerified,
+                TechnicalReference: "stale-should-never-persist");
+        });
+
+        var worker1Task = RunSingleCycleAsync(dbConnectionString, executor, TimeProvider.System, options, "worker-stale", ct);
+        await stageStarted.Task.WaitAsync(ct);
+
+        // Simulate another worker taking over the lease in PostgreSQL before worker-stale renews.
+        await using (var conn = new NpgsqlConnection(dbConnectionString))
+        {
+            await conn.OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand(
+                """
+                UPDATE platform.tenant_provisioning_operations
+                SET lease_owner = 'worker-new-owner',
+                    lease_version = lease_version + 1,
+                    lease_until_utc = NOW() + INTERVAL '60 seconds',
+                    attempt_count = attempt_count + 1
+                WHERE id = @opId;
+                """,
+                conn);
+            cmd.Parameters.AddWithValue("opId", opId);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        var result = await worker1Task;
+
+        Assert.True(stageCanceledObserved);
+        Assert.Equal(ProvisioningCycleOutcome.LeaseLost, result.Outcome);
+
+        await using var verifyContext = fixture.CreateDbContext(dbConnectionString);
+        var op = await verifyContext.TenantProvisioningOperations.SingleAsync(o => o.Id == opId, ct);
+        Assert.Equal("worker-new-owner", op.LeaseOwner);
+        Assert.Equal(2, op.LeaseVersion);
+        Assert.Equal(ProvisioningStageState.Pending, op.InfrastructureStageState);
+        Assert.Null(op.InfrastructureResourceRef);
+    }
+
+    [Fact]
+    public async Task CrashAfterExternalSideEffectBeforeConfirm_RecoveryVerifiesWithoutDuplicatingEffect()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var dbConnectionString = await CreateMigratedIsolatedDatabaseAsync("crash_verify", ct);
+        var clock = new MutableTimeProvider(BaseUtc);
+
+        var created = await RegisterSyntheticTenantAsync(dbConnectionString, "clinica-crash-01", clock, ct);
+        var opId = created.InitialProvisioning!.OperationId;
+        var expectedRequestId = created.InitialProvisioning.ProvisioningRequestId;
+
+        var createdClusters = new List<string>();
+        var verificationFlagsObserved = new List<bool>();
+
+        var crashingExecutor = new ScriptedProvisioningStageExecutor((ctx, _) =>
+        {
+            if (ctx.Stage == ProvisioningStage.InfrastructureInstance)
+            {
+                createdClusters.Add($"cnpg-{ctx.TenantPublicId}");
+                throw new InvalidOperationException("Simulated worker crash right after creating CNPG cluster and before persisting CONFIRMED.");
+            }
+
+            return Task.FromResult(new ProvisioningStageResult(ProvisioningStageOutcomeKind.AdapterNotConfigured));
+        });
+
+        var options = new ProvisioningWorkerOptions
+        {
+            Enabled = true,
+            MaxAutomaticRetries = 3,
+            LeaseDurationSeconds = 30
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RunSingleCycleAsync(dbConnectionString, crashingExecutor, clock, options, "worker-crashed", ct));
+
+        Assert.Single(createdClusters);
+
+        await using (var crashedContext = fixture.CreateDbContext(dbConnectionString))
+        {
+            var crashedOp = await crashedContext.TenantProvisioningOperations.SingleAsync(o => o.Id == opId, ct);
+            Assert.Equal(ProvisioningOperationStatus.InProgress, crashedOp.Status);
+            Assert.Equal(ProvisioningStageState.Pending, crashedOp.InfrastructureStageState);
+            Assert.Equal("worker-crashed", crashedOp.LeaseOwner);
+            Assert.Equal(1, crashedOp.AttemptCount);
+        }
+
+        // Advance past lease expiration so Worker 2 recovers the abandoned IN_PROGRESS operation.
+        clock.Advance(TimeSpan.FromSeconds(45));
+
+        var recoveryExecutor = new ScriptedProvisioningStageExecutor((ctx, _) =>
+        {
+            if (ctx.Stage == ProvisioningStage.InfrastructureInstance)
+            {
+                verificationFlagsObserved.Add(ctx.RequiresVerification);
+
+                var expectedClusterRef = $"cnpg-{ctx.TenantPublicId}";
+                if (ctx.RequiresVerification && createdClusters.Contains(expectedClusterRef))
+                {
+                    // Existing resource verified without creating a duplicate.
+                    return Task.FromResult(new ProvisioningStageResult(
+                        ProvisioningStageOutcomeKind.StageVerified,
+                        TechnicalReference: expectedClusterRef));
+                }
+
+                createdClusters.Add(expectedClusterRef);
+                return Task.FromResult(new ProvisioningStageResult(
+                    ProvisioningStageOutcomeKind.StageVerified,
+                    TechnicalReference: expectedClusterRef));
+            }
+
+            return Task.FromResult(new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.StageVerified,
+                TechnicalReference: ctx.Stage switch
+                {
+                    ProvisioningStage.ClinicalPreparation => "20261124_init",
+                    ProvisioningStage.IdentityPreparation => "acct-crash-01",
+                    _ => null
+                }));
+        });
+
+        var recoveryCycle = await RunSingleCycleAsync(dbConnectionString, recoveryExecutor, clock, options, "worker-recovery", ct);
+
+        Assert.Equal(ProvisioningCycleOutcome.AwaitingRealActivation, recoveryCycle.Outcome);
+        Assert.Equal([true], verificationFlagsObserved);
+        Assert.Single(createdClusters);
+
+        await using var verifyContext = fixture.CreateDbContext(dbConnectionString);
+        var op = await verifyContext.TenantProvisioningOperations.SingleAsync(o => o.Id == opId, ct);
+        var tenant = await verifyContext.Tenants.SingleAsync(t => t.Id == created.Id, ct);
+
+        Assert.Equal(ProvisioningStageState.Confirmed, op.InfrastructureStageState);
+        Assert.Equal("cnpg-clinica-crash-01", op.InfrastructureResourceRef);
+        Assert.Equal(2, op.LeaseVersion);
+        Assert.Equal(2, op.AttemptCount);
+        Assert.Equal(expectedRequestId, op.ProvisioningRequestId);
+        Assert.Equal(ProvisioningOperationStatus.FailedRetryable, op.Status);
+        Assert.Equal("REAL_ACTIVATION_NOT_ENABLED", op.LastErrorCode);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
+    }
+
     private async Task<string> CreateMigratedIsolatedDatabaseAsync(string suffix, CancellationToken ct)
     {
         var dbConnectionString = await fixture.CreateEmptyDatabaseAsync(
@@ -608,14 +854,25 @@ public sealed class ProvisioningWorkerIntegrationTests(PostgreSqlFixture fixture
         return await processor.ProcessNextAsync(workerId, ct);
     }
 
-    private sealed class ScriptedProvisioningStageExecutor(
-        Func<ProvisioningStageContext, ProvisioningStageResult> script) : IProvisioningStageExecutor
+    private sealed class ScriptedProvisioningStageExecutor : IProvisioningStageExecutor
     {
+        private readonly Func<ProvisioningStageContext, CancellationToken, Task<ProvisioningStageResult>> _script;
+
+        public ScriptedProvisioningStageExecutor(Func<ProvisioningStageContext, ProvisioningStageResult> script)
+            : this((context, _) => Task.FromResult(script(context)))
+        {
+        }
+
+        public ScriptedProvisioningStageExecutor(Func<ProvisioningStageContext, CancellationToken, Task<ProvisioningStageResult>> script)
+        {
+            _script = script;
+        }
+
         public bool SupportsRealProvisioning => false;
 
         public Task<ProvisioningStageResult> ExecuteStageAsync(
             ProvisioningStageContext context,
             CancellationToken cancellationToken) =>
-            Task.FromResult(script(context));
+            _script(context, cancellationToken);
     }
 }

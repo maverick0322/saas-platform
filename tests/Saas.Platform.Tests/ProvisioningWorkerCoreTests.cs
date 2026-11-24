@@ -21,7 +21,12 @@ public sealed class ProvisioningWorkerCoreTests
         Assert.Equal(3, options.MaxAutomaticRetries);
         Assert.Equal(4, options.MaxTotalAttempts);
         Assert.Equal(TimeSpan.FromSeconds(60), options.LeaseDuration);
+        Assert.Equal(TimeSpan.FromSeconds(20), options.LeaseRenewalInterval);
         Assert.Equal(TimeSpan.FromSeconds(5), options.PollInterval);
+
+        var shortLeaseOptions = new ProvisioningWorkerOptions { LeaseDurationSeconds = 1 };
+        Assert.True(shortLeaseOptions.LeaseRenewalInterval >= TimeSpan.FromMilliseconds(100));
+        Assert.Equal(TimeSpan.FromMilliseconds(1000.0 / 3.0), shortLeaseOptions.LeaseRenewalInterval);
 
         Assert.Equal(TimeSpan.FromSeconds(15), options.CalculateRetryBackoff(1));
         Assert.Equal(TimeSpan.FromSeconds(30), options.CalculateRetryBackoff(2));

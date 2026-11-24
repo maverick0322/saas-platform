@@ -84,6 +84,22 @@ public sealed class ProvisioningLeaseStore(PlatformDbContext dbContext)
                 lease_until_utc = NULL,
                 next_attempt_at_utc = NULL,
                 manual_intervention_required = TRUE,
+                infrastructure_stage_state = CASE
+                    WHEN infrastructure_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE infrastructure_stage_state
+                END,
+                service_databases_stage_state = CASE
+                    WHEN infrastructure_stage_state = 'CONFIRMED' AND service_databases_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE service_databases_stage_state
+                END,
+                clinical_stage_state = CASE
+                    WHEN infrastructure_stage_state = 'CONFIRMED' AND service_databases_stage_state = 'CONFIRMED' AND clinical_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE clinical_stage_state
+                END,
+                identity_stage_state = CASE
+                    WHEN infrastructure_stage_state = 'CONFIRMED' AND service_databases_stage_state = 'CONFIRMED' AND clinical_stage_state = 'CONFIRMED' AND identity_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE identity_stage_state
+                END,
                 last_error_code = 'RETRIES_EXHAUSTED_LEASE_EXPIRED',
                 last_error_summary = 'Provisioning lease expired after reaching the maximum configured attempts; manual intervention is required.',
                 updated_at_utc = @utcNow,
@@ -147,6 +163,22 @@ public sealed class ProvisioningLeaseStore(PlatformDbContext dbContext)
                 attempt_count = target.attempt_count + 1,
                 last_attempt_at_utc = @utcNow,
                 next_attempt_at_utc = NULL,
+                infrastructure_stage_state = CASE
+                    WHEN target.status = 'IN_PROGRESS' AND target.infrastructure_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE target.infrastructure_stage_state
+                END,
+                service_databases_stage_state = CASE
+                    WHEN target.status = 'IN_PROGRESS' AND target.infrastructure_stage_state = 'CONFIRMED' AND target.service_databases_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE target.service_databases_stage_state
+                END,
+                clinical_stage_state = CASE
+                    WHEN target.status = 'IN_PROGRESS' AND target.infrastructure_stage_state = 'CONFIRMED' AND target.service_databases_stage_state = 'CONFIRMED' AND target.clinical_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE target.clinical_stage_state
+                END,
+                identity_stage_state = CASE
+                    WHEN target.status = 'IN_PROGRESS' AND target.infrastructure_stage_state = 'CONFIRMED' AND target.service_databases_stage_state = 'CONFIRMED' AND target.clinical_stage_state = 'CONFIRMED' AND target.identity_stage_state = 'PENDING' THEN 'VERIFICATION_REQUIRED'
+                    ELSE target.identity_stage_state
+                END,
                 updated_at_utc = @utcNow,
                 concurrency_stamp = @concurrencyStamp
             FROM candidate
