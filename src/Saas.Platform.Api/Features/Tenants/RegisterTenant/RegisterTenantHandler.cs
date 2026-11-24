@@ -17,43 +17,68 @@ public sealed class RegisterTenantHandler(
     {
         ArgumentNullException.ThrowIfNull(command);
 
-        if (!Tenant.TryRegister(
-                command.PublicId,
-                command.Name,
-                command.ContactEmail,
-                timeProvider.GetUtcNow(),
-                out var tenant,
-                out var validationErrors)
-            || tenant is null)
+        var utcNow = timeProvider.GetUtcNow().ToUniversalTime();
+
+        var tenantValid = Tenant.TryRegister(
+            command.PublicId,
+            command.Name,
+            command.ContactEmail,
+            utcNow,
+            out var tenant,
+            out var tenantErrors);
+
+        var adminValid = TenantProvisioningOperation.TryValidateInitialAdmin(
+            command.InitialAdminFullName,
+            command.InitialAdminEmail,
+            out _,
+            out _,
+            out var adminErrors);
+
+        if (!tenantValid || !adminValid || tenant is null)
         {
-            return RegisterTenantResult.ValidationFailed(validationErrors);
+            var allErrors = new List<TenantValidationError>(tenantErrors.Count + adminErrors.Count);
+            allErrors.AddRange(tenantErrors);
+            allErrors.AddRange(adminErrors);
+            return RegisterTenantResult.ValidationFailed(allErrors);
+        }
+
+        if (!TenantProvisioningOperation.TryCreateInitial(
+                tenant.Id,
+                command.InitialAdminFullName,
+                command.InitialAdminEmail,
+                utcNow,
+                out var operation,
+                out var operationErrors)
+            || operation is null)
+        {
+            return RegisterTenantResult.ValidationFailed(operationErrors);
         }
 
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
         dbContext.Tenants.Add(tenant);
+        dbContext.TenantProvisioningOperations.Add(operation);
 
         try
         {
             await dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }
-        catch (DbUpdateException ex) when (IsPublicIdUniqueViolation(ex))
+        catch (DbUpdateException ex) when (TryMapConflictReason(ex, tenant.PublicId, out var conflictReason))
         {
             await transaction.RollbackAsync(cancellationToken);
-            dbContext.Entry(tenant).State = EntityState.Detached;
+            DetachTrackedEntities(tenant, operation);
 
             logger.LogWarning(
-                "Tenant catalog registration rejected due to duplicate PublicId {PublicId}.",
+                "Tenant catalog registration rejected due to uniqueness conflict for PublicId {PublicId}.",
                 tenant.PublicId);
 
-            return RegisterTenantResult.Conflict(
-                $"A tenant with public identifier '{tenant.PublicId}' is already registered.");
+            return RegisterTenantResult.Conflict(conflictReason);
         }
         catch (DbUpdateConcurrencyException ex)
         {
             await transaction.RollbackAsync(cancellationToken);
-            dbContext.Entry(tenant).State = EntityState.Detached;
+            DetachTrackedEntities(tenant, operation);
 
             logger.LogWarning(
                 ex,
@@ -65,23 +90,48 @@ public sealed class RegisterTenantHandler(
         }
 
         logger.LogInformation(
-            "Registered tenant administrative catalog entry {TenantId} ({PublicId}).",
-            tenant.Id,
-            tenant.PublicId);
-
-        return RegisterTenantResult.Created(new TenantDetails(
+            "Registered tenant {TenantId} ({PublicId}) in state {OperationalState} with durable provisioning operation {OperationId} ({ProvisioningRequestId}).",
             tenant.Id,
             tenant.PublicId,
-            tenant.Name,
-            tenant.ContactEmail,
-            tenant.CreatedAtUtc,
-            tenant.UpdatedAtUtc));
+            tenant.OperationalState.ToCode(),
+            operation.Id,
+            operation.ProvisioningRequestId);
+
+        return RegisterTenantResult.Created(TenantDetailsMapper.Map(tenant, operation));
     }
 
-    private static bool IsPublicIdUniqueViolation(DbUpdateException exception) =>
-        exception.InnerException is PostgresException
+    private void DetachTrackedEntities(Tenant tenant, TenantProvisioningOperation operation)
+    {
+        dbContext.Entry(operation).State = EntityState.Detached;
+        dbContext.Entry(tenant).State = EntityState.Detached;
+    }
+
+    private static bool TryMapConflictReason(
+        DbUpdateException exception,
+        string publicId,
+        out string conflictReason)
+    {
+        if (exception.InnerException is PostgresException
+            {
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: var constraintName
+            })
         {
-            SqlState: PostgresErrorCodes.UniqueViolation,
-            ConstraintName: "ux_tenants_public_id"
-        };
+            switch (constraintName)
+            {
+                case "ux_tenants_public_id":
+                    conflictReason = $"A tenant with public identifier '{publicId}' is already registered.";
+                    return true;
+                case "ux_tenant_provisioning_operations_tenant_id":
+                    conflictReason = $"An initial provisioning operation already exists for tenant '{publicId}'.";
+                    return true;
+                case "ux_tenant_provisioning_operations_provisioning_request_id":
+                    conflictReason = "A provisioning operation with the same request identifier already exists.";
+                    return true;
+            }
+        }
+
+        conflictReason = string.Empty;
+        return false;
+    }
 }

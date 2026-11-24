@@ -27,16 +27,21 @@ Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md), [`ADR-0002`](doc
 
 **El documento no está ratificado por ambos integrantes.** Los RPC, esquemas, rutas y mecanismos de autenticación propuestos **no están autorizados para implementación definitiva** hasta cerrar D-01 a D-04. La preparación técnica de APP-00 es independiente de ese acuerdo.
 
-Estados mínimos del tenant **propuestos en el documento**: `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA`. No están implementados en APP-00.
+Estados operativos del tenant (`PENDIENTE_ADMIN`, `ACTIVA`, `SUSPENDIDA`) incorporados en el modelo de dominio y catálogo global de **PLAT-02A** (toda clínica inicia en `PENDIENTE_ADMIN`). `Identity READY` es **necesario pero no suficiente** para pasar a `ACTIVA` (`ADR-0002` / `ADR-0003`); la activación efectiva, el trabajador de aprovisionamiento y la integración gRPC siguen fuera de alcance hasta sus incrementos aprobados.
 
-## Estructura actual (PLAT-01)
+## Estructura actual (PLAT-02A)
 
 ```text
 Saas.Platform.sln
 src/
   Saas.Platform.Api/
     Domain/
+      AdministrativeValidation.cs
+      ProvisioningOperationStatus.cs
       Tenant.cs
+      TenantActivationPrerequisites.cs
+      TenantOperationalState.cs
+      TenantProvisioningOperation.cs
       TenantValidationError.cs
     Features/
       Tenants/
@@ -44,6 +49,7 @@ src/
           GetTenantByIdHandler.cs
           GetTenantByIdQuery.cs
           TenantDetails.cs
+          TenantProvisioningSummary.cs
         RegisterTenant/
           RegisterTenantCommand.cs
           RegisterTenantHandler.cs
@@ -51,9 +57,12 @@ src/
     Persistence/
       Configurations/
         TenantConfiguration.cs
+        TenantProvisioningOperationConfiguration.cs
       Migrations/
         20261122180000_InitialTenantCatalog.cs
         20261122180000_InitialTenantCatalog.Designer.cs
+        20261124053749_AddTenantOperationalStateAndProvisioningOperations.cs
+        20261124053749_AddTenantOperationalStateAndProvisioningOperations.Designer.cs
         PlatformDbContextModelSnapshot.cs
       PlatformDbContext.cs
       PlatformDbContextFactory.cs
@@ -68,22 +77,24 @@ tests/
     PostgreSqlFixture.cs
     TenantCatalogIntegrationTests.cs
     TenantDomainValidationTests.cs
+    TenantProvisioningIntegrationTests.cs
     Saas.Platform.Tests.csproj
 Dockerfile
 .dockerignore
 .github/workflows/ci.yml
 ```
 
-Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 porque la autenticación definitiva de SuperAdmin y los contratos con Identity siguen pendientes de ratificación; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
+Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 / PLAT-02A porque la autenticación definitiva de SuperAdmin y los contratos con Identity siguen pendientes de ratificación; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
 
 ## Prerrequisitos
 
 - **.NET 10 SDK** (`10.0.x`) para restaurar, compilar, ejecutar y probar localmente.
 - **Docker** (en ejecución) para las pruebas de integración con PostgreSQL real mediante **Testcontainers** y para construir la imagen de contenedor. No se requiere K3s ni Argo CD para ejecutar `dotnet test`.
 
-## Persistencia global y migraciones (PLAT-01)
+## Persistencia global y migraciones (PLAT-01 / PLAT-02A)
 
-- Platform utiliza su propia base PostgreSQL global (esquema `platform`, tabla `platform.tenants`), independiente de las instancias por tenant (`ADR-0002`).
+- Platform utiliza su propia base PostgreSQL global (esquema `platform`, tablas `platform.tenants` y `platform.tenant_provisioning_operations`), independiente de las instancias por tenant (`ADR-0002`).
+- Cada clínica nueva inicia en `PENDIENTE_ADMIN` y registra atómicamente (en la misma transacción ACID) su operación durable inicial con `provisioning_request_id` único e inmutable y los datos estables del administrador inicial (diferenciados de `contact_email`).
 - La cadena de conexión se suministra mediante configuración estándar o secretos externos en `ConnectionStrings:PlatformDatabase` (variable de entorno `ConnectionStrings__PlatformDatabase`). No se almacenan credenciales reales en Git ni en `appsettings.json`.
 - El esquema se gestiona exclusivamente mediante migraciones versionadas de EF Core (`Persistence/Migrations/`); no se utiliza `EnsureCreated` ni se aplican migraciones automáticamente al arrancar la API o sobre bases de tenants.
 
@@ -122,15 +133,15 @@ curl -i http://localhost:8080/health/ready
 `tests/Saas.Platform.Tests/` incluye:
 
 - **Pruebas HTTP técnicas y de seguridad (`HealthEndpointsTests`):** ejecutan `Program` en memoria mediante `WebApplicationFactory<Program>` sin requerir PostgreSQL ni Kubernetes; verifican `/health/live`, `/health/ready`, `404` ante rutas inexistentes y la ausencia de endpoints administrativos anónimos.
-- **Pruebas unitarias de dominio (`TenantDomainValidationTests`):** verifican normalización e invariantes administrativas mínimas de `Tenant` sin dependencias externas.
-- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migración inicial reproducible sobre base vacía (sin cambios de modelo pendientes), persistencia real tras recrear `PlatformDbContext`, unicidad de `public_id`, concurrencia de altas duplicadas, concurrencia optimista (`DbUpdateConcurrencyException`) y restricciones `CHECK` en PostgreSQL.
+- **Pruebas unitarias de dominio (`TenantDomainValidationTests`):** verifican normalización, invariantes administrativas de `Tenant`, prerequisitos de activación (`CanActivate`), invariantes de `TenantProvisioningOperation` y sanitización de diagnósticos sin secretos.
+- **Pruebas de integración con PostgreSQL real (`TenantCatalogIntegrationTests`, `TenantProvisioningIntegrationTests`):** utilizan **Testcontainers** (`postgres:17-alpine`) para verificar migraciones reproducibles sobre base vacía y sobre esquema PLAT-01 previo, persistencia atómica ACID de tenant + operación, recuperación tras recrear `PlatformDbContext`, unicidad de `public_id` / `tenant_id` / `provisioning_request_id`, concurrencia de altas duplicadas, concurrencia optimista (`DbUpdateConcurrencyException`), registro de error recuperable sin secretos y restricciones `CHECK` / `FK` en PostgreSQL.
 
 ```bash
 # Ejecutar toda la suite (requiere .NET 10 SDK y Docker activo para Testcontainers)
 dotnet test Saas.Platform.sln --configuration Release
 
 # Ejecutar únicamente pruebas sin Docker (dominio y endpoints técnicos)
-dotnet test Saas.Platform.sln --configuration Release --filter "FullyQualifiedName!~TenantCatalogIntegrationTests"
+dotnet test Saas.Platform.sln --configuration Release --filter "FullyQualifiedName!~IntegrationTests"
 ```
 
 En GitHub Actions (`ubuntu-latest`), `dotnet test` ejecuta la suite completa, incluidas las pruebas de integración con PostgreSQL real vía Testcontainers (no se omiten silenciosamente).
@@ -177,6 +188,7 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **Imagen inmutable verificada:** `ghcr.io/maverick0322/saas-platform@sha256:104c651cd22324935c161314a28aeb7fd8728090710ad355b26cd37842b00746` (verificada mediante `sudo k3s crictl pull` en containerd: ID `e833cadbe2d3d`, 104 MB).
 - **PLAT-00 (documental, integrado en `develop` vía PR #7):** formalización de arquitectura multitenant ([`ADR-0002`](docs/adr/ADR-0002-multitenant-persistence.md)) y de consistencia transaccional y aprovisionamiento ([`ADR-0003`](docs/adr/ADR-0003-transactional-consistency-and-provisioning.md)).
 - **PLAT-01 (catálogo global y persistencia de Platform):** `PlatformDbContext` global con EF Core + PostgreSQL, migración inicial versionada (`20261122180000_InitialTenantCatalog`), vertical slices internos (`RegisterTenant`, `GetTenantById`) y pruebas de integración con Testcontainers. Rutas HTTP administrativas diferidas hasta ratificar autenticación de SuperAdmin y contratos con Identity.
+- **PLAT-02A (estados operativos y aprovisionamiento durable):** estados `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA` en `Tenant` (inicio obligatorio en `PENDIENTE_ADMIN` y bloqueo de activación sin prerrequisitos completos), entidad durable `TenantProvisioningOperation` con `provisioning_request_id` estable, migración versionada incremental (`20261124053749_AddTenantOperationalStateAndProvisioningOperations`), registro atómico ACID y representación administrativa preparada en `GetTenantById` (sin trabajador, CloudNativePG, llamadas gRPC, activación efectiva ni rutas administrativas anónimas).
 - **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
   - **LAB-07:** `PASS LOCAL`.
   - **LAB-08:** `PASS LOCAL`.

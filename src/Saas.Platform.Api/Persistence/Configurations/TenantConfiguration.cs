@@ -21,6 +21,10 @@ internal sealed class TenantConfiguration : IEntityTypeConfiguration<Tenant>
             tableBuilder.HasCheckConstraint(
                 "ck_tenants_contact_email_not_empty",
                 "char_length(btrim(contact_email)) >= 3");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenants_operational_state",
+                $"operational_state IN ('{TenantOperationalStateExtensions.PendienteAdminCode}', '{TenantOperationalStateExtensions.ActivaCode}', '{TenantOperationalStateExtensions.SuspendidaCode}')");
         });
 
         builder.HasKey(tenant => tenant.Id)
@@ -44,6 +48,18 @@ internal sealed class TenantConfiguration : IEntityTypeConfiguration<Tenant>
             .HasColumnName("contact_email")
             .HasMaxLength(Tenant.ContactEmailMaxLength)
             .IsRequired();
+
+        builder.Property(tenant => tenant.OperationalState)
+            .HasColumnName("operational_state")
+            .HasMaxLength(Tenant.OperationalStateMaxLength)
+            .HasConversion(
+                state => state.ToCode(),
+                code => TenantOperationalStateExtensions.ParseCode(code))
+            .HasDefaultValue(TenantOperationalState.PendienteAdmin)
+            .ValueGeneratedNever()
+            .IsRequired();
+
+        builder.Ignore(tenant => tenant.MayAuthenticate);
 
         builder.Property(tenant => tenant.CreatedAtUtc)
             .HasColumnName("created_at_utc")

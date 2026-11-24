@@ -2,7 +2,7 @@
 
 Documento de entrega para el desarrollador y agente de `saas-platform`. Este repositorio **no** implementa código de servicio todavía (`APP-00`); aquí queda congelado el contrato Protobuf compartido y las especificaciones exactas que `saas-platform` debe implementar para conectarse con `saas-identity` (ya operativo en Docker).
 
-> Contrato congelado: [`platform_identity.proto`](proto/platform_identity/v1/platform_identity.proto) (`package vital.platform_identity.v1`, `csharp_namespace = "Saas.Contracts.PlatformIdentity.V1"`).
+> Contrato congelado: [`platform_identity.proto`](proto/platform_identity/v1/platform_identity.proto) (`package vital.platform_identity.v1`, `csharp_namespace = "Saas.Contracts.PlatformIdentity.V1"`). Este archivo `.proto` no se modifica unilateralmente.
 
 ---
 
@@ -33,20 +33,20 @@ Documento de entrega para el desarrollador y agente de `saas-platform`. Este rep
 3. **Autenticación servicio-a-servicio:**
    - Enviar cabecera de metadata gRPC: `x-internal-service-key`.
    - Secreto por defecto en entorno local Docker: `VitalInternalGrpcDevKey2026!` (inyectable por configuración/env var, nunca hardcodeado para producción).
-4. **Timeout y reintentos (`CU-11 A3`):**
+4. **Timeout y reintentos (`CU-11 A3`) y condición de activación (`ADR-0002` / `ADR-0003`):**
    - Deadline recomendado por llamada: **5 segundos** (`DateTime.UtcNow.AddSeconds(5)`).
    - Al registrar una clínica (`POST /v1/tenants`), Platform debe:
-     1. Persistir primero el tenant en `PENDIENTE_ADMIN` junto con un `provisioning_request_id` único (UUID) en la base privada de Platform.
-     2. Invocar `ProvisionInitialClinicAdmin` con ese `provisioning_request_id`.
-     3. Transicionar el tenant a `ACTIVA` **únicamente** cuando reciba `PROVISIONING_STATUS_READY` y persista confirmación e `initial_admin_account_id`.
+     1. Persistir primero el tenant en `PENDIENTE_ADMIN` junto con un `provisioning_request_id` único (UUID) y los datos estables del administrador inicial en la base privada de Platform dentro de la misma transacción ACID.
+     2. Invocar `ProvisionInitialClinicAdmin` con ese `provisioning_request_id` (desde el flujo/trabajador de aprovisionamiento cuando corresponda).
+     3. **`Identity READY` es necesario pero no suficiente para activar la clínica:** recibir `PROVISIONING_STATUS_READY` confirma únicamente que la cuenta `ADMIN_CLINICA` quedó habilitada en Identity. Conforme a [`ADR-0002`](../adr/ADR-0002-multitenant-persistence.md) y [`ADR-0003`](../adr/ADR-0003-transactional-consistency-and-provisioning.md), Platform puede transicionar el tenant a `ACTIVA` **únicamente** después de persistir la confirmación e `initial_admin_account_id` **y** confirmar también todos los prerrequisitos obligatorios (instancia PostgreSQL dedicada del tenant lista en CloudNativePG y bases/migraciones requeridas por servicio preparadas).
      4. Ante `Unavailable` o `DeadlineExceeded`, mantener `PENDIENTE_ADMIN` conservando exactamente el mismo `provisioning_request_id` para que `POST /v1/tenants/{tenantId}/retry-initial-admin` reintente de forma idempotente.
-     5. Solo enviar el **mismo** `provisioning_request_id` si los datos (`tenant_id`, `admin_email`, `admin_full_name`) coinciden; si cambian, generar un nuevo `provisioning_request_id` solo cuando corresponda antes de completarse.
+     5. Solo enviar el **mismo** `provisioning_request_id` si los datos (`tenant_id`, `admin_email`, `admin_full_name`) coinciden; no cambiar silenciosamente el correo o nombre después de asociarlos a una operación enviada a Identity.
 
 #### Tabla de códigos gRPC devueltos por `saas-identity`
 
 | StatusCode gRPC | Causa | Acción recomendada en `saas-platform` |
 |---|---|---|
-| `OK` (`READY`) | Cuenta `ADMIN_CLINICA` habilitada y correo despachado (o reintento idempotente de una operación ya `READY`) | Persistir `initial_admin_account_id` y pasar tenant a `ACTIVA`. |
+| `OK` (`READY`) | Cuenta `ADMIN_CLINICA` habilitada y correo despachado (o reintento idempotente de una operación ya `READY`) | Persistir confirmación e `initial_admin_account_id`; evaluar activación a `ACTIVA` solo si además la instancia PostgreSQL del tenant y las bases de servicio requeridas están listas (`Identity READY` es necesario pero no suficiente). |
 | `InvalidArgument` | `tenant_id` no es UUID, faltan campos o `admin_email` es inválido | Corregir datos antes de invocar; no reintentar igual. |
 | `Unauthenticated` | Falta `x-internal-service-key` o clave incorrecta | Revisar secreto interno compartido. |
 | `FailedPrecondition` | Mismo `provisioning_request_id` reutilizado con distinto `tenant_id`, `admin_email` o `admin_full_name` (`PROVISIONING_CONFLICT`) | Mantener `PENDIENTE_ADMIN` y generar nueva operación si hubo cambio administrativo legítimo. |

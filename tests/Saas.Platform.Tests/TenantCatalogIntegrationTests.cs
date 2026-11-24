@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Saas.Platform.Api.Domain;
 using Saas.Platform.Api.Features.Tenants.GetTenantById;
 using Saas.Platform.Api.Features.Tenants.RegisterTenant;
 using Xunit;
@@ -22,6 +23,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
 
         var pendingBefore = (await dbContext.Database.GetPendingMigrationsAsync(ct)).ToList();
         Assert.Contains("20261122180000_InitialTenantCatalog", pendingBefore);
+        Assert.Contains("20261124053749_AddTenantOperationalStateAndProvisioningOperations", pendingBefore);
 
         await dbContext.Database.MigrateAsync(ct);
 
@@ -29,6 +31,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         var pendingAfter = (await dbContext.Database.GetPendingMigrationsAsync(ct)).ToList();
 
         Assert.Contains("20261122180000_InitialTenantCatalog", applied);
+        Assert.Contains("20261124053749_AddTenantOperationalStateAndProvisioningOperations", applied);
         Assert.Empty(pendingAfter);
         Assert.False(dbContext.Database.HasPendingModelChanges());
     }
@@ -51,7 +54,9 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                 new RegisterTenantCommand(
                     PublicId: publicId.ToUpperInvariant(),
                     Name: "Clínica Sintética Central",
-                    ContactEmail: "Admin@Clinica-Central.Test"),
+                    ContactEmail: "Contacto@Clinica-Central.Test",
+                    InitialAdminFullName: "Dra. Sofía Mendoza",
+                    InitialAdminEmail: "Admin.Inicial@Clinica-Central.Test"),
                 ct);
         }
 
@@ -64,7 +69,10 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         Assert.NotEqual(Guid.Empty, createdTenant.Id);
         Assert.Equal(publicId, createdTenant.PublicId);
         Assert.Equal("Clínica Sintética Central", createdTenant.Name);
-        Assert.Equal("admin@clinica-central.test", createdTenant.ContactEmail);
+        Assert.Equal("contacto@clinica-central.test", createdTenant.ContactEmail);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, createdTenant.OperationalState);
+        Assert.Equal("PENDIENTE_ADMIN", createdTenant.OperationalStateCode);
+        Assert.False(createdTenant.MayAuthenticate);
 
         // Recreate DbContext to verify real persistence in PostgreSQL.
         await using var readContext = fixture.CreateDbContext();
@@ -77,6 +85,10 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         Assert.Equal(createdTenant.PublicId, loaded.PublicId);
         Assert.Equal(createdTenant.Name, loaded.Name);
         Assert.Equal(createdTenant.ContactEmail, loaded.ContactEmail);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, loaded.OperationalState);
+        Assert.NotNull(loaded.InitialProvisioning);
+        Assert.Equal(createdTenant.InitialProvisioning!.OperationId, loaded.InitialProvisioning.OperationId);
+        Assert.Equal(createdTenant.InitialProvisioning.ProvisioningRequestId, loaded.InitialProvisioning.ProvisioningRequestId);
 
         Assert.Null(await queryHandler.HandleAsync(new GetTenantByIdQuery(Guid.Empty), ct));
         Assert.Null(await queryHandler.HandleAsync(new GetTenantByIdQuery(Guid.NewGuid()), ct));
@@ -96,7 +108,12 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                 NullLogger<RegisterTenantHandler>.Instance);
 
             var first = await handler.HandleAsync(
-                new RegisterTenantCommand(publicId, "Clínica Sintética Uno", "uno@clinica.test"),
+                new RegisterTenantCommand(
+                    publicId,
+                    "Clínica Sintética Uno",
+                    "contacto-uno@clinica.test",
+                    "Admin Uno",
+                    "admin-uno@clinica.test"),
                 ct);
             Assert.Equal(RegisterTenantStatus.Created, first.Status);
         }
@@ -109,7 +126,12 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                 NullLogger<RegisterTenantHandler>.Instance);
 
             var duplicate = await handler.HandleAsync(
-                new RegisterTenantCommand(publicId.ToUpperInvariant(), "Clínica Sintética Dos", "dos@clinica.test"),
+                new RegisterTenantCommand(
+                    publicId.ToUpperInvariant(),
+                    "Clínica Sintética Dos",
+                    "contacto-dos@clinica.test",
+                    "Admin Dos",
+                    "admin-dos@clinica.test"),
                 ct);
 
             Assert.Equal(RegisterTenantStatus.Conflict, duplicate.Status);
@@ -130,7 +152,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
 
         using var barrier = new SemaphoreSlim(0, 2);
 
-        async Task<RegisterTenantResult> RegisterAttemptAsync(string name, string email)
+        async Task<RegisterTenantResult> RegisterAttemptAsync(string name, string contactEmail, string adminName, string adminEmail)
         {
             await using var context = fixture.CreateDbContext();
             var handler = new RegisterTenantHandler(
@@ -139,11 +161,13 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                 NullLogger<RegisterTenantHandler>.Instance);
 
             await barrier.WaitAsync(ct);
-            return await handler.HandleAsync(new RegisterTenantCommand(publicId, name, email), ct);
+            return await handler.HandleAsync(
+                new RegisterTenantCommand(publicId, name, contactEmail, adminName, adminEmail),
+                ct);
         }
 
-        var task1 = RegisterAttemptAsync("Clínica Concurrente A", "a@clinica.test");
-        var task2 = RegisterAttemptAsync("Clínica Concurrente B", "b@clinica.test");
+        var task1 = RegisterAttemptAsync("Clínica Concurrente A", "contacto-a@clinica.test", "Admin A", "admin-a@clinica.test");
+        var task2 = RegisterAttemptAsync("Clínica Concurrente B", "contacto-b@clinica.test", "Admin B", "admin-b@clinica.test");
 
         barrier.Release(2);
         var results = await Task.WhenAll(task1, task2);
@@ -171,7 +195,12 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                 NullLogger<RegisterTenantHandler>.Instance);
 
             var created = await handler.HandleAsync(
-                new RegisterTenantCommand(publicId, "Clínica Original", "orig@clinica.test"),
+                new RegisterTenantCommand(
+                    publicId,
+                    "Clínica Original",
+                    "contacto-orig@clinica.test",
+                    "Admin Original",
+                    "admin-orig@clinica.test"),
                 ct);
             Assert.Equal(RegisterTenantStatus.Created, created.Status);
             tenantId = created.Tenant!.Id;
@@ -200,8 +229,8 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
 
         await using var command = new NpgsqlCommand(
             """
-            INSERT INTO platform.tenants (id, public_id, name, contact_email, created_at_utc, updated_at_utc, concurrency_stamp)
-            VALUES (@id, 'x', 'Clínica Inválida', 'admin@clinica.test', NOW(), NOW(), @stamp);
+            INSERT INTO platform.tenants (id, public_id, name, contact_email, operational_state, created_at_utc, updated_at_utc, concurrency_stamp)
+            VALUES (@id, 'x', 'Clínica Inválida', 'admin@clinica.test', 'PENDIENTE_ADMIN', NOW(), NOW(), @stamp);
             """,
             connection);
 
@@ -218,7 +247,8 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         var ct = TestContext.Current.CancellationToken;
 
         await using var context = fixture.CreateDbContext();
-        var initialCount = await context.Tenants.CountAsync(ct);
+        var initialTenantCount = await context.Tenants.CountAsync(ct);
+        var initialOpCount = await context.TenantProvisioningOperations.CountAsync(ct);
 
         var handler = new RegisterTenantHandler(
             context,
@@ -226,14 +256,16 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
             NullLogger<RegisterTenantHandler>.Instance);
 
         var result = await handler.HandleAsync(
-            new RegisterTenantCommand("a", "", "correo-invalido"),
+            new RegisterTenantCommand("a", "", "correo-invalido", "", "admin-invalido"),
             ct);
 
         Assert.Equal(RegisterTenantStatus.ValidationFailed, result.Status);
         Assert.Null(result.Tenant);
-        Assert.Equal(3, result.ValidationErrors.Count);
+        Assert.Equal(5, result.ValidationErrors.Count);
 
-        var afterCount = await context.Tenants.CountAsync(ct);
-        Assert.Equal(initialCount, afterCount);
+        var afterTenantCount = await context.Tenants.CountAsync(ct);
+        var afterOpCount = await context.TenantProvisioningOperations.CountAsync(ct);
+        Assert.Equal(initialTenantCount, afterTenantCount);
+        Assert.Equal(initialOpCount, afterOpCount);
     }
 }

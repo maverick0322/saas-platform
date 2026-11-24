@@ -12,7 +12,7 @@ Lee antes de editar: `README.md`, `docs/engineering/GIT-CI-CD.md`, `ADR-0001`, `
 
 Platform es dueño del catálogo administrativo global de tenants (en su propia base global independiente de PostgreSQL, según `ADR-0002`), y coordina, cuando se apruebe, el aprovisionamiento de clínicas (mediante un componente trabajador propio de Platform, según `ADR-0003`, sin crear un microservicio independiente) y el alta de la cuenta inicial a través de Identity. **Identity** es dueño de cuentas, contraseñas, sesiones, roles y activación; **Clinical** de pacientes y expedientes. No compartir tablas, `DbContext`, entidades de dominio, claves foráneas ni consultar directamente bases de otros servicios. SuperAdmin no tiene acceso clínico.
 
-Los estados `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA` están **propuestos en el contrato candidato**: no implementarlos hasta que se apruebe el incremento correspondiente. No inventar requisitos de Billing, BI, Agenda, Document o Prescription.
+Los estados `PENDIENTE_ADMIN`, `ACTIVA` y `SUSPENDIDA` se incorporaron en el catálogo de `Tenant` en **PLAT-02A** (iniciando toda clínica en `PENDIENTE_ADMIN`), manteniendo fuera de alcance la activación efectiva, el trabajador de aprovisionamiento, los clientes/servidores gRPC y las rutas HTTP administrativas hasta sus incrementos aprobados. No inventar requisitos de Billing, BI, Agenda, Document o Prescription.
 
 ## 3. Principios de ingeniería obligatorios
 

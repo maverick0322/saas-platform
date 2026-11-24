@@ -36,7 +36,7 @@ builder.Services
 var app = builder.Build();
 
 // Technical health endpoints only. Administrative tenant HTTP endpoints are intentionally
-// deferred until SuperAdmin authentication and Identity contracts are ratified (PLAT-01).
+// deferred until SuperAdmin authentication and Identity contracts are ratified (PLAT-01 / PLAT-02A).
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("live"),
