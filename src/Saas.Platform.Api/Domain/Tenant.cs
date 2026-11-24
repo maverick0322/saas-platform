@@ -1,12 +1,10 @@
-using System.Net.Mail;
 using System.Text.RegularExpressions;
 
 namespace Saas.Platform.Api.Domain;
 
 /// <summary>
-/// Registro administrativo mínimo de una clínica (tenant) en el catálogo global de Platform.
-/// No representa por sí solo una clínica operativamente habilitada ni incluye estados candidatos
-/// pendientes de ratificación.
+/// Registro administrativo de una clínica (tenant) en el catálogo global de Platform.
+/// Toda clínica recién registrada comienza en estado operativo <see cref="TenantOperationalState.PendienteAdmin"/>.
 /// </summary>
 public sealed partial class Tenant
 {
@@ -15,6 +13,7 @@ public sealed partial class Tenant
     public const int NameMinLength = 2;
     public const int NameMaxLength = 150;
     public const int ContactEmailMaxLength = 254;
+    public const int OperationalStateMaxLength = 32;
 
     private Tenant()
     {
@@ -25,6 +24,7 @@ public sealed partial class Tenant
         string publicId,
         string name,
         string contactEmail,
+        TenantOperationalState operationalState,
         DateTimeOffset createdAtUtc,
         Guid concurrencyStamp)
     {
@@ -32,6 +32,7 @@ public sealed partial class Tenant
         PublicId = publicId;
         Name = name;
         ContactEmail = contactEmail;
+        OperationalState = operationalState;
         CreatedAtUtc = createdAtUtc;
         UpdatedAtUtc = createdAtUtc;
         ConcurrencyStamp = concurrencyStamp;
@@ -44,6 +45,10 @@ public sealed partial class Tenant
     public string Name { get; private set; } = string.Empty;
 
     public string ContactEmail { get; private set; } = string.Empty;
+
+    public TenantOperationalState OperationalState { get; private set; } = TenantOperationalState.PendienteAdmin;
+
+    public bool MayAuthenticate => OperationalState == TenantOperationalState.Activa;
 
     public DateTimeOffset CreatedAtUtc { get; private set; }
 
@@ -84,51 +89,20 @@ public sealed partial class Tenant
                 "PublicId must use lowercase ASCII letters, digits, and single internal hyphens (without dots or spaces)."));
         }
 
-        var normalizedName = NormalizeName(name);
-        if (string.IsNullOrEmpty(normalizedName))
-        {
-            validationErrors.Add(new TenantValidationError(
-                nameof(Name),
-                "required",
-                "Name is required."));
-        }
-        else if (normalizedName.Length < NameMinLength || normalizedName.Length > NameMaxLength)
-        {
-            validationErrors.Add(new TenantValidationError(
-                nameof(Name),
-                "length",
-                $"Name must be between {NameMinLength} and {NameMaxLength} characters."));
-        }
-        else if (ContainsControlCharacters(normalizedName))
-        {
-            validationErrors.Add(new TenantValidationError(
-                nameof(Name),
-                "format",
-                "Name must not contain control characters."));
-        }
+        var normalizedName = AdministrativeValidation.ValidatePersonOrEntityName(
+            name,
+            nameof(Name),
+            "Name",
+            NameMinLength,
+            NameMaxLength,
+            validationErrors);
 
-        var normalizedEmail = NormalizeEmail(contactEmail);
-        if (string.IsNullOrEmpty(normalizedEmail))
-        {
-            validationErrors.Add(new TenantValidationError(
-                nameof(ContactEmail),
-                "required",
-                "ContactEmail is required."));
-        }
-        else if (normalizedEmail.Length > ContactEmailMaxLength)
-        {
-            validationErrors.Add(new TenantValidationError(
-                nameof(ContactEmail),
-                "length",
-                $"ContactEmail must not exceed {ContactEmailMaxLength} characters."));
-        }
-        else if (!IsValidEmail(normalizedEmail))
-        {
-            validationErrors.Add(new TenantValidationError(
-                nameof(ContactEmail),
-                "format",
-                "ContactEmail must be a valid email address."));
-        }
+        var normalizedEmail = AdministrativeValidation.ValidateEmail(
+            contactEmail,
+            nameof(ContactEmail),
+            "ContactEmail",
+            ContactEmailMaxLength,
+            validationErrors);
 
         if (validationErrors.Count > 0)
         {
@@ -143,6 +117,7 @@ public sealed partial class Tenant
             publicId: normalizedPublicId,
             name: normalizedName,
             contactEmail: normalizedEmail,
+            operationalState: TenantOperationalState.PendienteAdmin,
             createdAtUtc: utcNow,
             concurrencyStamp: Guid.NewGuid());
 
@@ -150,13 +125,69 @@ public sealed partial class Tenant
         return true;
     }
 
+    /// <summary>
+    /// Evalúa si la clínica cumple todas las condiciones obligatorias para transicionar a ACTIVA.
+    /// En PLAT-02A no ejecuta la transición efectiva; únicamente verifica invariantes de dominio.
+    /// </summary>
+    public bool CanActivate(
+        TenantActivationPrerequisites prerequisites,
+        out IReadOnlyList<TenantValidationError> unmetRequirements)
+    {
+        ArgumentNullException.ThrowIfNull(prerequisites);
+
+        var failures = new List<TenantValidationError>();
+
+        if (OperationalState != TenantOperationalState.PendienteAdmin)
+        {
+            failures.Add(new TenantValidationError(
+                nameof(OperationalState),
+                "invalid_state",
+                $"Tenant must be in '{TenantOperationalStateExtensions.PendienteAdminCode}' state before activation."));
+        }
+
+        if (!prerequisites.TenantDatabaseInstanceReady)
+        {
+            failures.Add(new TenantValidationError(
+                nameof(TenantActivationPrerequisites.TenantDatabaseInstanceReady),
+                "prerequisite_not_confirmed",
+                "Dedicated tenant PostgreSQL instance readiness must be confirmed before activation."));
+        }
+
+        if (!prerequisites.ServiceDatabasesPrepared)
+        {
+            failures.Add(new TenantValidationError(
+                nameof(TenantActivationPrerequisites.ServiceDatabasesPrepared),
+                "prerequisite_not_confirmed",
+                "Required per-service databases and migrations must be confirmed before activation."));
+        }
+
+        if (!prerequisites.IdentityInitialAdminReady)
+        {
+            failures.Add(new TenantValidationError(
+                nameof(TenantActivationPrerequisites.IdentityInitialAdminReady),
+                "prerequisite_not_confirmed",
+                "Identity initial clinic administrator provisioning must be confirmed READY before activation."));
+        }
+
+        if (string.IsNullOrWhiteSpace(prerequisites.InitialAdminAccountId))
+        {
+            failures.Add(new TenantValidationError(
+                nameof(TenantActivationPrerequisites.InitialAdminAccountId),
+                "prerequisite_not_confirmed",
+                "Confirmed InitialAdminAccountId from Identity is required before activation."));
+        }
+
+        unmetRequirements = failures;
+        return failures.Count == 0;
+    }
+
     public void UpdateAdministrativeName(string name, DateTimeOffset updatedAtUtc)
     {
-        var normalizedName = NormalizeName(name);
+        var normalizedName = AdministrativeValidation.NormalizeName(name);
         if (string.IsNullOrEmpty(normalizedName)
             || normalizedName.Length < NameMinLength
             || normalizedName.Length > NameMaxLength
-            || ContainsControlCharacters(normalizedName))
+            || AdministrativeValidation.ContainsControlCharacters(normalizedName))
         {
             throw new ArgumentException(
                 $"Name must be between {NameMinLength} and {NameMaxLength} printable characters.",
@@ -170,45 +201,6 @@ public sealed partial class Tenant
 
     public static string NormalizePublicId(string? value) =>
         value?.Trim().ToLowerInvariant() ?? string.Empty;
-
-    private static string NormalizeName(string? value) =>
-        value?.Trim() ?? string.Empty;
-
-    private static string NormalizeEmail(string? value) =>
-        value?.Trim().ToLowerInvariant() ?? string.Empty;
-
-    private static bool ContainsControlCharacters(string value) =>
-        value.Any(char.IsControl);
-
-    private static bool IsValidEmail(string value)
-    {
-        if (value.Any(char.IsWhiteSpace) || value.Any(char.IsControl))
-        {
-            return false;
-        }
-
-        try
-        {
-            var address = new MailAddress(value);
-            if (!string.Equals(address.Address, value, StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            var atIndex = value.IndexOf('@');
-            if (atIndex <= 0 || atIndex >= value.Length - 3)
-            {
-                return false;
-            }
-
-            var domain = value[(atIndex + 1)..];
-            return domain.Contains('.') && !domain.StartsWith('.') && !domain.EndsWith('.');
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
-    }
 
     [GeneratedRegex("^[a-z0-9]+(?:-[a-z0-9]+)*$", RegexOptions.CultureInvariant)]
     private static partial Regex PublicIdRegex();

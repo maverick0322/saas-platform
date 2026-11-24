@@ -25,8 +25,8 @@
 
 | Estado de origen | Evento | Estado destino | Regla |
 |---|---|---|---|
-| — | Registro válido por SuperAdmin | `PENDIENTE_ADMIN` | El tenant existe en Platform pero aún no debe habilitar login operativo |
-| `PENDIENTE_ADMIN` | Identity confirma que el primer administrador quedó habilitado | `ACTIVA` | Solo después de persistir la confirmación |
+| — | Registro válido por SuperAdmin | `PENDIENTE_ADMIN` | El tenant existe en Platform junto con su operación durable de aprovisionamiento, pero aún no debe habilitar login operativo |
+| `PENDIENTE_ADMIN` | Confirmación de todos los prerrequisitos obligatorios (instancia PostgreSQL del tenant, bases de servicio e Identity `READY` para el primer administrador) | `ACTIVA` | `Identity READY` es **necesario pero no suficiente** (`ADR-0002` / `ADR-0003`); solo activar tras persistir la confirmación completa de todos los requisitos |
 | `PENDIENTE_ADMIN` | Identity falla o vence el tiempo de respuesta | `PENDIENTE_ADMIN` | Reintento seguro; no reportar activación |
 | `ACTIVA` | Suspensión por SuperAdmin | `SUSPENDIDA` | Sin borrado de registros |
 | `SUSPENDIDA` | Reactivación por SuperAdmin | `ACTIVA` | Conservando cuentas y registros; permisos individuales vigentes se vuelven a evaluar |
@@ -73,7 +73,7 @@ No se inventa otro estado de tenant por cada error técnico. El error de aprovis
 | `POST /v1/tenants/{tenantId}/suspend` | Suspender clínica `ACTIVA` (CU-15; puede implementarse después del contrato inicial) |
 | `POST /v1/tenants/{tenantId}/reactivate` | Reactivar clínica `SUSPENDIDA` (CU-15; puede implementarse después del contrato inicial) |
 
-Son **ejemplos de rutas**, no OpenAPI aprobado. Una solicitud de creación puede responder éxito con `ACTIVA` solo si la habilitación está confirmada; de lo contrario debe indicar `PENDIENTE_ADMIN` (por ejemplo, mediante una respuesta aceptada/persistida según la semántica HTTP que se acuerde). Nunca declarar completado un alta incompleta.
+Son **ejemplos de rutas**, no OpenAPI aprobado. Una solicitud de creación puede responder éxito con `ACTIVA` solo si todos los requisitos obligatorios de aprovisionamiento (instancia PostgreSQL, bases de servicio e `Identity READY`) están confirmados; de lo contrario debe indicar `PENDIENTE_ADMIN` (por ejemplo, mediante una respuesta aceptada/persistida según la semántica HTTP que se acuerde). Nunca declarar completado un alta incompleta.
 
 ## 6. Errores de integración y seguridad
 
@@ -92,7 +92,7 @@ Tiempo límite, número de reintentos, autenticación servicio-a-servicio y pol�
 
 ## 7. Criterios de aceptación de la primera integración
 
-1. `CreateTenant` con Identity disponible: un tenant y un administrador inicial; estado `ACTIVA` solo cuando la cuenta está habilitada.
+1. `CreateTenant` con aprovisionamiento completo: un tenant y un administrador inicial; estado `ACTIVA` únicamente cuando la infraestructura PostgreSQL del tenant, las bases requeridas por servicio y la cuenta en Identity (`READY`) están confirmadas (`Identity READY` es necesario pero no suficiente).
 2. Identity falla antes de crear la cuenta: Platform conserva `PENDIENTE_ADMIN` y no informa `ACTIVA`.
 3. Identity completa el alta pero se pierde la respuesta: el reintento con el mismo ID recupera el mismo `initialAdminAccountId` sin duplicar.
 4. Dos solicitudes concurrentes/reintentos para el mismo alta no producen dos administradores iniciales.

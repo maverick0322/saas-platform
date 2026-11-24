@@ -8,7 +8,7 @@ public sealed class TenantDomainValidationTests
     private static readonly DateTimeOffset FixedUtcNow = new(2026, 11, 22, 18, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public void TryRegister_WithValidSyntheticData_NormalizesAndCreatesTenant()
+    public void TryRegister_WithValidSyntheticData_NormalizesAndCreatesTenantInPendienteAdmin()
     {
         var ok = Tenant.TryRegister(
             publicId: "  Clinica-San-Mateo-01  ",
@@ -25,6 +25,8 @@ public sealed class TenantDomainValidationTests
         Assert.Equal("clinica-san-mateo-01", tenant.PublicId);
         Assert.Equal("Clínica Sintética San Mateo", tenant.Name);
         Assert.Equal("admin.sanmateo@clinica-sintetica.test", tenant.ContactEmail);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
         Assert.Equal(FixedUtcNow, tenant.CreatedAtUtc);
         Assert.Equal(FixedUtcNow, tenant.UpdatedAtUtc);
         Assert.NotEqual(Guid.Empty, tenant.ConcurrencyStamp);
@@ -118,5 +120,183 @@ public sealed class TenantDomainValidationTests
         Assert.Contains(errors, e => e.Field == nameof(Tenant.PublicId));
         Assert.Contains(errors, e => e.Field == nameof(Tenant.Name));
         Assert.Contains(errors, e => e.Field == nameof(Tenant.ContactEmail));
+    }
+
+    [Fact]
+    public void CanActivate_WithIdentityReadyAlone_RejectsActivationBecauseInfrastructureIsNotConfirmed()
+    {
+        Tenant.TryRegister(
+            "clinica-prereq-01",
+            "Clínica Sintética Prerrequisitos",
+            "contacto@clinica-prereq.test",
+            FixedUtcNow,
+            out var tenant,
+            out _);
+
+        Assert.NotNull(tenant);
+
+        var eligible = tenant.CanActivate(
+            new TenantActivationPrerequisites(
+                TenantDatabaseInstanceReady: false,
+                ServiceDatabasesPrepared: false,
+                IdentityInitialAdminReady: true,
+                InitialAdminAccountId: "acct-synth-01"),
+            out var unmet);
+
+        Assert.False(eligible);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
+        Assert.Contains(unmet, e => e.Field == nameof(TenantActivationPrerequisites.TenantDatabaseInstanceReady));
+        Assert.Contains(unmet, e => e.Field == nameof(TenantActivationPrerequisites.ServiceDatabasesPrepared));
+    }
+
+    [Fact]
+    public void CanActivate_WithMissingIdentityConfirmationOrAccountId_RejectsActivation()
+    {
+        Tenant.TryRegister(
+            "clinica-prereq-02",
+            "Clínica Sintética Sin Identity",
+            "contacto@clinica-prereq-02.test",
+            FixedUtcNow,
+            out var tenant,
+            out _);
+
+        Assert.NotNull(tenant);
+
+        var eligible = tenant.CanActivate(
+            new TenantActivationPrerequisites(
+                TenantDatabaseInstanceReady: true,
+                ServiceDatabasesPrepared: true,
+                IdentityInitialAdminReady: false,
+                InitialAdminAccountId: "  "),
+            out var unmet);
+
+        Assert.False(eligible);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.Contains(unmet, e => e.Field == nameof(TenantActivationPrerequisites.IdentityInitialAdminReady));
+        Assert.Contains(unmet, e => e.Field == nameof(TenantActivationPrerequisites.InitialAdminAccountId));
+    }
+
+    [Fact]
+    public void CanActivate_WhenAllPrerequisitesConfirmed_ReturnsTrueWithoutMutatingStateInPlat02A()
+    {
+        Tenant.TryRegister(
+            "clinica-prereq-03",
+            "Clínica Sintética Completa",
+            "contacto@clinica-prereq-03.test",
+            FixedUtcNow,
+            out var tenant,
+            out _);
+
+        Assert.NotNull(tenant);
+
+        var eligible = tenant.CanActivate(
+            new TenantActivationPrerequisites(
+                TenantDatabaseInstanceReady: true,
+                ServiceDatabasesPrepared: true,
+                IdentityInitialAdminReady: true,
+                InitialAdminAccountId: "acct-synth-03"),
+            out var unmet);
+
+        Assert.True(eligible);
+        Assert.Empty(unmet);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
+    }
+
+    [Fact]
+    public void TryCreateInitial_WithValidInitialAdmin_CreatesPendingOperationWithUuidRequestId()
+    {
+        var tenantId = Guid.CreateVersion7(FixedUtcNow);
+
+        var ok = TenantProvisioningOperation.TryCreateInitial(
+            tenantId,
+            "  Dra. Elena Ríos  ",
+            "  Elena.Rios@Clinica-Sintetica.Test  ",
+            FixedUtcNow,
+            out var operation,
+            out var errors);
+
+        Assert.True(ok);
+        Assert.Empty(errors);
+        Assert.NotNull(operation);
+        Assert.NotEqual(Guid.Empty, operation.Id);
+        Assert.Equal(tenantId, operation.TenantId);
+        Assert.True(Guid.TryParseExact(operation.ProvisioningRequestId, "D", out var parsedRequestId));
+        Assert.Equal(operation.Id, parsedRequestId);
+        Assert.Equal("Dra. Elena Ríos", operation.InitialAdminFullName);
+        Assert.Equal("elena.rios@clinica-sintetica.test", operation.InitialAdminEmail);
+        Assert.Equal(ProvisioningOperationStatus.Pending, operation.Status);
+        Assert.Equal(0, operation.AttemptCount);
+        Assert.Null(operation.LastErrorCode);
+        Assert.Null(operation.LastErrorSummary);
+        Assert.Null(operation.LastAttemptAtUtc);
+        Assert.Null(operation.CompletedAtUtc);
+        Assert.True(operation.MatchesInitialAdminPayload(tenantId, "Dra. Elena Ríos", "ELENA.RIOS@CLINICA-SINTETICA.TEST"));
+        Assert.False(operation.MatchesInitialAdminPayload(tenantId, "Dra. Elena Ríos", "otro@clinica-sintetica.test"));
+    }
+
+    [Theory]
+    [InlineData(null, "admin@clinica.test", nameof(TenantProvisioningOperation.InitialAdminFullName), "required")]
+    [InlineData("A", "admin@clinica.test", nameof(TenantProvisioningOperation.InitialAdminFullName), "length")]
+    [InlineData("Admin\nNombre", "admin@clinica.test", nameof(TenantProvisioningOperation.InitialAdminFullName), "format")]
+    [InlineData("Admin Sintético", null, nameof(TenantProvisioningOperation.InitialAdminEmail), "required")]
+    [InlineData("Admin Sintético", "correo-invalido", nameof(TenantProvisioningOperation.InitialAdminEmail), "format")]
+    public void TryCreateInitial_WithInvalidInitialAdmin_ReturnsExpectedValidationError(
+        string? fullName,
+        string? email,
+        string expectedField,
+        string expectedCode)
+    {
+        var ok = TenantProvisioningOperation.TryCreateInitial(
+            Guid.NewGuid(),
+            fullName,
+            email,
+            FixedUtcNow,
+            out var operation,
+            out var errors);
+
+        Assert.False(ok);
+        Assert.Null(operation);
+        Assert.Contains(errors, e => e.Field == expectedField && e.Code == expectedCode);
+    }
+
+    [Fact]
+    public void RecordRecoverableFailure_PreservesRequestIdAndAdminDataAndRedactsSecrets()
+    {
+        var tenantId = Guid.CreateVersion7(FixedUtcNow);
+        TenantProvisioningOperation.TryCreateInitial(
+            tenantId,
+            "Dr. Marco Paredes",
+            "marco.paredes@clinica-sintetica.test",
+            FixedUtcNow,
+            out var operation,
+            out _);
+
+        Assert.NotNull(operation);
+        var originalId = operation.Id;
+        var originalRequestId = operation.ProvisioningRequestId;
+
+        var retryAt = FixedUtcNow.AddMinutes(2);
+        operation.RecordRecoverableFailure(
+            "identity_unavailable",
+            "gRPC Unavailable with x-internal-service-key: SyntheticSecret123! password=TempValue456 Bearer eyJfakeToken",
+            retryAt);
+
+        Assert.Equal(originalId, operation.Id);
+        Assert.Equal(originalRequestId, operation.ProvisioningRequestId);
+        Assert.Equal("Dr. Marco Paredes", operation.InitialAdminFullName);
+        Assert.Equal("marco.paredes@clinica-sintetica.test", operation.InitialAdminEmail);
+        Assert.Equal(ProvisioningOperationStatus.FailedRetryable, operation.Status);
+        Assert.Equal(1, operation.AttemptCount);
+        Assert.Equal("IDENTITY_UNAVAILABLE", operation.LastErrorCode);
+        Assert.Equal(retryAt, operation.LastAttemptAtUtc);
+        Assert.Equal(retryAt, operation.UpdatedAtUtc);
+        Assert.Null(operation.CompletedAtUtc);
+        Assert.NotNull(operation.LastErrorSummary);
+        Assert.DoesNotContain("SyntheticSecret123!", operation.LastErrorSummary);
+        Assert.DoesNotContain("TempValue456", operation.LastErrorSummary);
+        Assert.DoesNotContain("eyJfakeToken", operation.LastErrorSummary);
+        Assert.Contains("[REDACTED]", operation.LastErrorSummary);
     }
 }

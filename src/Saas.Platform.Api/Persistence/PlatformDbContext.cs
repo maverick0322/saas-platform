@@ -11,9 +11,12 @@ public sealed class PlatformDbContext(DbContextOptions<PlatformDbContext> option
 
     public DbSet<Tenant> Tenants => Set<Tenant>();
 
+    public DbSet<TenantProvisioningOperation> TenantProvisioningOperations => Set<TenantProvisioningOperation>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema(SchemaName);
         modelBuilder.ApplyConfiguration(new TenantConfiguration());
+        modelBuilder.ApplyConfiguration(new TenantProvisioningOperationConfiguration());
     }
 }

@@ -12,16 +12,21 @@ public sealed class GetTenantByIdHandler(PlatformDbContext dbContext)
             return null;
         }
 
-        return await dbContext.Tenants
+        var row = await dbContext.Tenants
             .AsNoTracking()
             .Where(tenant => tenant.Id == query.TenantId)
-            .Select(tenant => new TenantDetails(
-                tenant.Id,
-                tenant.PublicId,
-                tenant.Name,
-                tenant.ContactEmail,
-                tenant.CreatedAtUtc,
-                tenant.UpdatedAtUtc))
+            .GroupJoin(
+                dbContext.TenantProvisioningOperations.AsNoTracking(),
+                tenant => tenant.Id,
+                operation => operation.TenantId,
+                (tenant, operations) => new { tenant, operations })
+            .SelectMany(
+                joined => joined.operations.DefaultIfEmpty(),
+                (joined, operation) => new { Tenant = joined.tenant, Operation = operation })
             .SingleOrDefaultAsync(cancellationToken);
+
+        return row is null
+            ? null
+            : TenantDetailsMapper.Map(row.Tenant, row.Operation);
     }
 }
