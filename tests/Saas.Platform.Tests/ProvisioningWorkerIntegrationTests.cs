@@ -827,7 +827,8 @@ public sealed class ProvisioningWorkerIntegrationTests(PostgreSqlFixture fixture
                 $"Clínica {publicId}",
                 $"contacto@{publicId}.test",
                 "Dr. Admin Inicial",
-                $"admin.inicial@{publicId}.test"),
+                $"admin.inicial@{publicId}.test",
+                MaxActiveAccounts: 25),
             ct);
 
         Assert.Equal(RegisterTenantStatus.Created, result.Status);

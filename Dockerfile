@@ -4,6 +4,7 @@ WORKDIR /src
 COPY src/Saas.Platform.Api/Saas.Platform.Api.csproj src/Saas.Platform.Api/
 RUN dotnet restore src/Saas.Platform.Api/Saas.Platform.Api.csproj
 
+COPY docs/contracts/proto/platform_identity/v1/platform_identity.proto docs/contracts/proto/platform_identity/v1/platform_identity.proto
 COPY src/Saas.Platform.Api/ src/Saas.Platform.Api/
 RUN dotnet publish src/Saas.Platform.Api/Saas.Platform.Api.csproj \
     --configuration Release \

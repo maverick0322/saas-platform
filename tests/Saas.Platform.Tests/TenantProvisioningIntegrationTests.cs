@@ -33,7 +33,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                     Name: "Clínica Sintética Aprovisionamiento",
                     ContactEmail: "facturacion.contacto@clinica-prov.test",
                     InitialAdminFullName: "Dr. Carlos Navarro",
-                    InitialAdminEmail: "admin.navarro@clinica-prov.test"),
+                    InitialAdminEmail: "admin.navarro@clinica-prov.test",
+                    MaxActiveAccounts: 25),
                 ct);
         }
 
@@ -84,7 +85,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                 Name: "Clínica Sintética Rollback",
                 ContactEmail: "contacto@clinica-atomic.test",
                 InitialAdminFullName: "A",
-                InitialAdminEmail: "correo-no-valido"),
+                InitialAdminEmail: "correo-no-valido",
+                MaxActiveAccounts: 25),
             ct);
 
         Assert.Equal(RegisterTenantStatus.ValidationFailed, result.Status);
@@ -120,7 +122,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                     Name: $"Clínica Paralela {suffix}",
                     ContactEmail: $"contacto-{suffix}@clinica-oprace.test",
                     InitialAdminFullName: $"Admin Paralelo {suffix}",
-                    InitialAdminEmail: $"admin-{suffix}@clinica-oprace.test"),
+                    InitialAdminEmail: $"admin-{suffix}@clinica-oprace.test",
+                    MaxActiveAccounts: 25),
                 ct);
         }
 
@@ -167,7 +170,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                     Name: "Clínica Reinicio Contexto",
                     ContactEmail: "contacto@clinica-reopen.test",
                     InitialAdminFullName: "Dra. Lucía Torres",
-                    InitialAdminEmail: "lucia.torres@clinica-reopen.test"),
+                    InitialAdminEmail: "lucia.torres@clinica-reopen.test",
+                    MaxActiveAccounts: 25),
                 ct);
         }
 
@@ -209,7 +213,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                     Name: "Clínica Reintento Durable",
                     ContactEmail: "contacto@clinica-retry.test",
                     InitialAdminFullName: "Dr. Javier Soto",
-                    InitialAdminEmail: "javier.soto@clinica-retry.test"),
+                    InitialAdminEmail: "javier.soto@clinica-retry.test",
+                    MaxActiveAccounts: 25),
                 ct);
         }
 
@@ -273,7 +278,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                     "Clínica Concurrencia Operación",
                     "contacto@clinica-opconc.test",
                     "Admin Concurrencia",
-                    "admin@clinica-opconc.test"),
+                    "admin@clinica-opconc.test",
+                    MaxActiveAccounts: 25),
                 ct);
 
             tenantId = created.Tenant!.Id;
@@ -312,7 +318,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                     "Clínica Restricciones PG",
                     "contacto@clinica-pgchk.test",
                     "Admin PG",
-                    "admin@clinica-pgchk.test"),
+                    "admin@clinica-pgchk.test",
+                    MaxActiveAccounts: 25),
                 ct);
         }
 
@@ -495,7 +502,8 @@ public sealed class TenantProvisioningIntegrationTests(PostgreSqlFixture fixture
                 "Clínica Nueva Post Migración",
                 "contacto@clinica-nueva.test",
                 "Admin Post Migración",
-                "admin@clinica-nueva.test"),
+                "admin@clinica-nueva.test",
+                MaxActiveAccounts: 25),
             ct);
 
         Assert.Equal(RegisterTenantStatus.Created, newTenantResult.Status);

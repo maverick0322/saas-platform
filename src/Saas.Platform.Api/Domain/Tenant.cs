@@ -14,6 +14,7 @@ public sealed partial class Tenant
     public const int NameMaxLength = 150;
     public const int ContactEmailMaxLength = 254;
     public const int OperationalStateMaxLength = 32;
+    public const int MinMaxActiveAccounts = 1;
 
     private Tenant()
     {
@@ -24,6 +25,7 @@ public sealed partial class Tenant
         string publicId,
         string name,
         string contactEmail,
+        int? maxActiveAccounts,
         TenantOperationalState operationalState,
         DateTimeOffset createdAtUtc,
         Guid concurrencyStamp)
@@ -32,6 +34,7 @@ public sealed partial class Tenant
         PublicId = publicId;
         Name = name;
         ContactEmail = contactEmail;
+        MaxActiveAccounts = maxActiveAccounts;
         OperationalState = operationalState;
         CreatedAtUtc = createdAtUtc;
         UpdatedAtUtc = createdAtUtc;
@@ -45,6 +48,8 @@ public sealed partial class Tenant
     public string Name { get; private set; } = string.Empty;
 
     public string ContactEmail { get; private set; } = string.Empty;
+
+    public int? MaxActiveAccounts { get; private set; }
 
     public TenantOperationalState OperationalState { get; private set; } = TenantOperationalState.PendienteAdmin;
 
@@ -60,6 +65,7 @@ public sealed partial class Tenant
         string? publicId,
         string? name,
         string? contactEmail,
+        int? maxActiveAccounts,
         DateTimeOffset createdAtUtc,
         out Tenant? tenant,
         out IReadOnlyList<TenantValidationError> errors)
@@ -104,6 +110,21 @@ public sealed partial class Tenant
             ContactEmailMaxLength,
             validationErrors);
 
+        if (maxActiveAccounts is null)
+        {
+            validationErrors.Add(new TenantValidationError(
+                nameof(MaxActiveAccounts),
+                "required",
+                "MaxActiveAccounts is required."));
+        }
+        else if (maxActiveAccounts < MinMaxActiveAccounts)
+        {
+            validationErrors.Add(new TenantValidationError(
+                nameof(MaxActiveAccounts),
+                "range",
+                $"MaxActiveAccounts must be at least {MinMaxActiveAccounts}."));
+        }
+
         if (validationErrors.Count > 0)
         {
             tenant = null;
@@ -117,6 +138,7 @@ public sealed partial class Tenant
             publicId: normalizedPublicId,
             name: normalizedName,
             contactEmail: normalizedEmail,
+            maxActiveAccounts: maxActiveAccounts,
             operationalState: TenantOperationalState.PendienteAdmin,
             createdAtUtc: utcNow,
             concurrencyStamp: Guid.NewGuid());
@@ -127,7 +149,7 @@ public sealed partial class Tenant
 
     /// <summary>
     /// Evalúa si la clínica cumple todas las condiciones obligatorias para transicionar a ACTIVA.
-    /// En PLAT-02A no ejecuta la transición efectiva; únicamente verifica invariantes de dominio.
+    /// En PLAT-02A / PLAT-03A no ejecuta la transición efectiva; únicamente verifica invariantes de dominio.
     /// </summary>
     public bool CanActivate(
         TenantActivationPrerequisites prerequisites,
@@ -143,6 +165,14 @@ public sealed partial class Tenant
                 nameof(OperationalState),
                 "invalid_state",
                 $"Tenant must be in '{TenantOperationalStateExtensions.PendienteAdminCode}' state before activation."));
+        }
+
+        if (MaxActiveAccounts is null or < MinMaxActiveAccounts)
+        {
+            failures.Add(new TenantValidationError(
+                nameof(MaxActiveAccounts),
+                "prerequisite_not_confirmed",
+                $"A positive {nameof(MaxActiveAccounts)} quota (>= {MinMaxActiveAccounts}) must be configured before activation."));
         }
 
         if (!prerequisites.TenantDatabaseInstanceReady)
@@ -201,6 +231,12 @@ public sealed partial class Tenant
 
     public static string NormalizePublicId(string? value) =>
         value?.Trim().ToLowerInvariant() ?? string.Empty;
+
+    public static bool IsValidPublicIdFormat(string normalizedPublicId) =>
+        !string.IsNullOrEmpty(normalizedPublicId)
+        && normalizedPublicId.Length >= PublicIdMinLength
+        && normalizedPublicId.Length <= PublicIdMaxLength
+        && PublicIdRegex().IsMatch(normalizedPublicId);
 
     [GeneratedRegex("^[a-z0-9]+(?:-[a-z0-9]+)*$", RegexOptions.CultureInvariant)]
     private static partial Regex PublicIdRegex();

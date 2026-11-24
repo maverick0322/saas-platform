@@ -25,6 +25,10 @@ internal sealed class TenantConfiguration : IEntityTypeConfiguration<Tenant>
             tableBuilder.HasCheckConstraint(
                 "ck_tenants_operational_state",
                 $"operational_state IN ('{TenantOperationalStateExtensions.PendienteAdminCode}', '{TenantOperationalStateExtensions.ActivaCode}', '{TenantOperationalStateExtensions.SuspendidaCode}')");
+
+            tableBuilder.HasCheckConstraint(
+                "ck_tenants_max_active_accounts_positive",
+                $"max_active_accounts IS NULL OR max_active_accounts >= {Tenant.MinMaxActiveAccounts}");
         });
 
         builder.HasKey(tenant => tenant.Id)
@@ -48,6 +52,9 @@ internal sealed class TenantConfiguration : IEntityTypeConfiguration<Tenant>
             .HasColumnName("contact_email")
             .HasMaxLength(Tenant.ContactEmailMaxLength)
             .IsRequired();
+
+        builder.Property(tenant => tenant.MaxActiveAccounts)
+            .HasColumnName("max_active_accounts");
 
         builder.Property(tenant => tenant.OperationalState)
             .HasColumnName("operational_state")

@@ -44,6 +44,10 @@ namespace Saas.Platform.Api.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at_utc");
 
+                    b.Property<int?>("MaxActiveAccounts")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_active_accounts");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(150)
@@ -77,6 +81,8 @@ namespace Saas.Platform.Api.Persistence.Migrations
                     b.ToTable("tenants", "platform", t =>
                         {
                             t.HasCheckConstraint("ck_tenants_contact_email_not_empty", "char_length(btrim(contact_email)) >= 3");
+
+                            t.HasCheckConstraint("ck_tenants_max_active_accounts_positive", "max_active_accounts IS NULL OR max_active_accounts >= 1");
 
                             t.HasCheckConstraint("ck_tenants_name_length", "char_length(btrim(name)) >= 2");
 

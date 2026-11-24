@@ -5,4 +5,5 @@ public sealed record RegisterTenantCommand(
     string? Name,
     string? ContactEmail,
     string? InitialAdminFullName,
-    string? InitialAdminEmail);
+    string? InitialAdminEmail,
+    int? MaxActiveAccounts);

@@ -25,6 +25,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         Assert.Contains("20261122180000_InitialTenantCatalog", pendingBefore);
         Assert.Contains("20261124053749_AddTenantOperationalStateAndProvisioningOperations", pendingBefore);
         Assert.Contains("20261124070500_AddProvisioningWorkerLeaseAndStageProgress", pendingBefore);
+        Assert.Contains("20261124093133_AddTenantMaxActiveAccounts", pendingBefore);
 
         await dbContext.Database.MigrateAsync(ct);
 
@@ -34,6 +35,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
         Assert.Contains("20261122180000_InitialTenantCatalog", applied);
         Assert.Contains("20261124053749_AddTenantOperationalStateAndProvisioningOperations", applied);
         Assert.Contains("20261124070500_AddProvisioningWorkerLeaseAndStageProgress", applied);
+        Assert.Contains("20261124093133_AddTenantMaxActiveAccounts", applied);
         Assert.Empty(pendingAfter);
         Assert.False(dbContext.Database.HasPendingModelChanges());
     }
@@ -58,7 +60,8 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                     Name: "Clínica Sintética Central",
                     ContactEmail: "Contacto@Clinica-Central.Test",
                     InitialAdminFullName: "Dra. Sofía Mendoza",
-                    InitialAdminEmail: "Admin.Inicial@Clinica-Central.Test"),
+                    InitialAdminEmail: "Admin.Inicial@Clinica-Central.Test",
+                    MaxActiveAccounts: 25),
                 ct);
         }
 
@@ -115,7 +118,8 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                     "Clínica Sintética Uno",
                     "contacto-uno@clinica.test",
                     "Admin Uno",
-                    "admin-uno@clinica.test"),
+                    "admin-uno@clinica.test",
+                    MaxActiveAccounts: 20),
                 ct);
             Assert.Equal(RegisterTenantStatus.Created, first.Status);
         }
@@ -133,7 +137,8 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                     "Clínica Sintética Dos",
                     "contacto-dos@clinica.test",
                     "Admin Dos",
-                    "admin-dos@clinica.test"),
+                    "admin-dos@clinica.test",
+                    MaxActiveAccounts: 20),
                 ct);
 
             Assert.Equal(RegisterTenantStatus.Conflict, duplicate.Status);
@@ -164,7 +169,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
 
             await barrier.WaitAsync(ct);
             return await handler.HandleAsync(
-                new RegisterTenantCommand(publicId, name, contactEmail, adminName, adminEmail),
+                new RegisterTenantCommand(publicId, name, contactEmail, adminName, adminEmail, MaxActiveAccounts: 20),
                 ct);
         }
 
@@ -202,7 +207,8 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
                     "Clínica Original",
                     "contacto-orig@clinica.test",
                     "Admin Original",
-                    "admin-orig@clinica.test"),
+                    "admin-orig@clinica.test",
+                    MaxActiveAccounts: 20),
                 ct);
             Assert.Equal(RegisterTenantStatus.Created, created.Status);
             tenantId = created.Tenant!.Id;
@@ -258,7 +264,7 @@ public sealed class TenantCatalogIntegrationTests(PostgreSqlFixture fixture)
             NullLogger<RegisterTenantHandler>.Instance);
 
         var result = await handler.HandleAsync(
-            new RegisterTenantCommand("a", "", "correo-invalido", "", "admin-invalido"),
+            new RegisterTenantCommand("a", "", "correo-invalido", "", "admin-invalido", MaxActiveAccounts: 20),
             ct);
 
         Assert.Equal(RegisterTenantStatus.ValidationFailed, result.Status);

@@ -13,6 +13,7 @@ public sealed record TenantDetails(
     TenantOperationalState OperationalState,
     string OperationalStateCode,
     bool MayAuthenticate,
+    int? MaxActiveAccounts,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     TenantProvisioningSummary? InitialProvisioning);
@@ -28,6 +29,7 @@ internal static class TenantDetailsMapper
             tenant.OperationalState,
             tenant.OperationalState.ToCode(),
             tenant.MayAuthenticate,
+            tenant.MaxActiveAccounts,
             tenant.CreatedAtUtc,
             tenant.UpdatedAtUtc,
             operation is null
