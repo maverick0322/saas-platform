@@ -1,11 +1,16 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Text.Json;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.IdentityModel.Tokens;
 using Saas.Platform.Api.Features.Provisioning;
+using Saas.Platform.Api.Features.Tenants.AdminHttp;
 using Saas.Platform.Api.Features.Tenants.GetTenantAccessState;
 using Saas.Platform.Api.Features.Tenants.GetTenantById;
+using Saas.Platform.Api.Features.Tenants.ListTenants;
 using Saas.Platform.Api.Features.Tenants.RegisterTenant;
 using Saas.Platform.Api.Persistence;
 
@@ -75,8 +80,17 @@ public static class PlatformHostFactory
 
         builder.Services.AddScoped<RegisterTenantHandler>();
         builder.Services.AddScoped<GetTenantByIdHandler>();
+        builder.Services.AddScoped<ListTenantsHandler>();
 
         configureBuilder?.Invoke(builder);
+
+        var adminApiOptions = new AdminApiOptions();
+        builder.Configuration.GetSection(AdminApiOptions.SectionName).Bind(adminApiOptions);
+
+        if (adminApiOptions.Enabled)
+        {
+            ConfigureAdminHttpSecurity(builder);
+        }
 
         var internalGrpcOptions = new InternalGrpcOptions();
         builder.Configuration.GetSection(InternalGrpcOptions.SectionName).Bind(internalGrpcOptions);
@@ -103,8 +117,13 @@ public static class PlatformHostFactory
 
         var app = builder.Build();
 
-        // Technical health endpoints only. Administrative tenant HTTP endpoints are intentionally
-        // deferred until SuperAdmin authentication and Identity contracts are ratified (PLAT-01 / PLAT-02A / PLAT-03A).
+        if (adminApiOptions.Enabled)
+        {
+            app.UseAuthentication();
+            app.UseAuthorization();
+        }
+
+        // Technical health endpoints remain anonymous and available in all API host configurations.
         // ProvisioningWorkerHostedService is intentionally excluded from the public API host (ADR-0003).
         app.MapHealthChecks("/health/live", new HealthCheckOptions
         {
@@ -118,17 +137,21 @@ public static class PlatformHostFactory
             ResponseWriter = (context, report) => WriteHealthResponseAsync(context, report, probe: "ready", scope: "process-only")
         });
 
+        if (adminApiOptions.Enabled)
+        {
+            app.MapAdminTenantEndpoints();
+        }
+
         if (internalGrpcOptions.Enabled)
         {
             app.MapGrpcService<TenantAccessGrpcService>();
-            app.Logger.LogInformation(
-                "Saas.Platform.Api initialized with technical health endpoints and internal TenantAccessService gRPC on HTTP/2 port {GrpcPort}.",
-                internalGrpcOptions.Port);
         }
-        else
-        {
-            app.Logger.LogInformation("Saas.Platform.Api initialized with technical health endpoints.");
-        }
+
+        app.Logger.LogInformation(
+            "Saas.Platform.Api initialized (AdminApi={AdminApiEnabled}, InternalGrpc={InternalGrpcEnabled}, GrpcPort={GrpcPort}).",
+            adminApiOptions.Enabled,
+            internalGrpcOptions.Enabled,
+            internalGrpcOptions.Port);
 
         return app;
     }
@@ -169,6 +192,68 @@ public static class PlatformHostFactory
         configureServices?.Invoke(builder.Services);
 
         return builder.Build();
+    }
+
+    private static void ConfigureAdminHttpSecurity(WebApplicationBuilder builder)
+    {
+        var jwtOptions = new JwtValidationOptions();
+        builder.Configuration.GetSection(JwtValidationOptions.SectionName).Bind(jwtOptions);
+        var signingKey = jwtOptions.ValidateAndCreateSigningKey(builder.Configuration);
+
+        var identityAuthOptions = new IdentityAuthOptions();
+        builder.Configuration.GetSection(IdentityAuthOptions.SectionName).Bind(identityAuthOptions);
+        var identityBaseUri = identityAuthOptions.ValidateAndGetBaseUri();
+
+        JwtSecurityTokenHandler.DefaultMapInboundClaims = false;
+
+        builder.Services
+            .AddAuthentication(options =>
+            {
+                options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+                options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+                options.DefaultForbidScheme = JwtBearerDefaults.AuthenticationScheme;
+            })
+            .AddJwtBearer(options =>
+            {
+                options.MapInboundClaims = false;
+                options.RequireHttpsMetadata = false;
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = jwtOptions.Issuer,
+                    ValidateAudience = true,
+                    ValidAudience = jwtOptions.Audience,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = signingKey,
+                    RequireSignedTokens = true,
+                    ValidAlgorithms = [SecurityAlgorithms.RsaSha256],
+                    ValidateLifetime = true,
+                    RequireExpirationTime = true,
+                    ClockSkew = TimeSpan.FromSeconds(JwtValidationOptions.DefaultClockSkewSeconds),
+                    RoleClaimType = "role"
+                };
+
+                TenantAdminEndpoints.ConfigureJwtBearerEvents(options);
+            });
+
+        builder.Services.AddAuthorizationBuilder()
+            .AddPolicy(AdminAuthPolicies.SuperAdmin, policy =>
+            {
+                policy.RequireAuthenticatedUser();
+                policy.RequireRole(IdentityClosedRoles.SuperAdmin);
+            });
+
+        builder.Services
+            .AddHttpClient<IIdentityAccountVerifier, IdentityMeAccountVerifier>(client =>
+            {
+                client.BaseAddress = identityBaseUri;
+                client.Timeout = TimeSpan.FromSeconds(identityAuthOptions.TimeoutSeconds);
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+            });
     }
 
     private static Task WriteHealthResponseAsync(HttpContext context, HealthReport report, string probe, string scope)
