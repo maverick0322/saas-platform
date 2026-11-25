@@ -255,6 +255,108 @@ public sealed class CloudNativePgWorkerIntegrationTests(PostgreSqlFixture fixtur
         Assert.True(persisted.ManualInterventionRequired);
     }
 
+    [Theory]
+    [InlineData(false, "nolabel")]
+    [InlineData(true, "wrongop")]
+    public async Task ProcessNextAsync_RejectsMissingOrMismatchedOperationLabelWithoutConfirmingOrActivatingTenant(
+        bool includeOperationLabel,
+        string slugSuffix)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = await CreateMigratedIsolatedDatabaseAsync($"cnpg_{slugSuffix}", ct);
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 11, 25, 13, 30, 0, TimeSpan.Zero));
+        var (tenantId, operationId) = await RegisterSyntheticTenantAsync(
+            connectionString,
+            $"cln-cnpg-{slugSuffix}",
+            clock,
+            ct);
+
+        var cnpgOptions = CreateFastOptions();
+        var otherOperationId = Guid.NewGuid();
+        var createCalls = 0;
+
+        var foreignClient = new DelegateClusterClient(
+            (_, _) => Task.FromResult(CloudNativePgGetResult.FoundCluster(
+                BuildSnapshot(
+                    tenantId,
+                    includeOperationLabel ? otherOperationId : operationId,
+                    cnpgOptions,
+                    includeOperationLabel: includeOperationLabel))),
+            (_, _) =>
+            {
+                createCalls++;
+                throw new InvalidOperationException("CreateClusterAsync must not be called on ownership conflict.");
+            });
+
+        var processor = CreateProcessor(connectionString, foreignClient, cnpgOptions, clock);
+        var result = await processor.ProcessNextAsync($"worker-{slugSuffix}", ct);
+
+        Assert.Equal(ProvisioningCycleOutcome.TerminalFailed, result.Outcome);
+        Assert.Equal(0, createCalls);
+
+        await using var db = fixture.CreateDbContext(connectionString);
+        var persisted = await db.TenantProvisioningOperations
+            .AsNoTracking()
+            .SingleAsync(item => item.Id == operationId, ct);
+        var tenant = await db.Tenants
+            .AsNoTracking()
+            .SingleAsync(item => item.Id == tenantId, ct);
+
+        Assert.Equal(ProvisioningOperationStatus.FailedTerminal, persisted.Status);
+        Assert.Equal("CNPG_CLUSTER_OWNERSHIP_CONFLICT", persisted.LastErrorCode);
+        Assert.NotEqual(ProvisioningStageState.Confirmed, persisted.InfrastructureStageState);
+        Assert.Null(persisted.InfrastructureResourceRef);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
+    }
+
+    [Fact]
+    public async Task ProcessNextAsync_StopsTerminallyWhenClusterUidChangesMidReconciliationWithoutConfirmingOrActivatingTenant()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = await CreateMigratedIsolatedDatabaseAsync("cnpg_uidshift", ct);
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 11, 25, 14, 0, 0, TimeSpan.Zero));
+        var (tenantId, operationId) = await RegisterSyntheticTenantAsync(
+            connectionString,
+            "cln-cnpg-uidshift",
+            clock,
+            ct);
+
+        var cnpgOptions = CreateFastOptions();
+        const string uidA = "11111111-aaaa-1111-aaaa-111111111111";
+        const string uidB = "22222222-bbbb-2222-bbbb-222222222222";
+
+        var client = new ScriptedClusterClient(
+            (_, _) =>
+            [
+                CloudNativePgGetResult.Missing(),
+                CloudNativePgGetResult.FoundCluster(BuildSnapshot(tenantId, operationId, cnpgOptions, uid: uidB))
+            ],
+            (_, _) => CloudNativePgCreateResult.CreatedCluster(
+                BuildSnapshot(tenantId, operationId, cnpgOptions, readyInstances: 0, phase: "Setting up primary", readyStatus: "False", uid: uidA)));
+
+        var processor = CreateProcessor(connectionString, client, cnpgOptions, clock);
+        var result = await processor.ProcessNextAsync("worker-uidshift", ct);
+
+        Assert.Equal(ProvisioningCycleOutcome.TerminalFailed, result.Outcome);
+        Assert.Equal(1, client.CreateCalls);
+
+        await using var db = fixture.CreateDbContext(connectionString);
+        var persisted = await db.TenantProvisioningOperations
+            .AsNoTracking()
+            .SingleAsync(item => item.Id == operationId, ct);
+        var tenant = await db.Tenants
+            .AsNoTracking()
+            .SingleAsync(item => item.Id == tenantId, ct);
+
+        Assert.Equal(ProvisioningOperationStatus.FailedTerminal, persisted.Status);
+        Assert.Equal("CNPG_CLUSTER_IDENTITY_MISMATCH", persisted.LastErrorCode);
+        Assert.NotEqual(ProvisioningStageState.Confirmed, persisted.InfrastructureStageState);
+        Assert.Null(persisted.InfrastructureResourceRef);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
+    }
+
     private async Task<string> CreateMigratedIsolatedDatabaseAsync(string prefix, CancellationToken ct)
     {
         var dbName = $"{prefix}_{Guid.NewGuid():N}"[..36];
@@ -340,19 +442,28 @@ public sealed class CloudNativePgWorkerIntegrationTests(PostgreSqlFixture fixtur
         CloudNativePgOptions options,
         int readyInstances = 1,
         string phase = "Cluster in healthy state",
-        string readyStatus = "True")
-        => new(
+        string readyStatus = "True",
+        bool includeOperationLabel = true,
+        string? uid = null)
+    {
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [CloudNativePgClusterSpec.ManagedByLabelKey] = CloudNativePgClusterSpec.ManagedByLabelValue,
+            [CloudNativePgClusterSpec.TenantIdLabelKey] = tenantId.ToString("D")
+        };
+
+        if (includeOperationLabel)
+        {
+            labels[CloudNativePgClusterSpec.OperationIdLabelKey] = operationId.ToString("D");
+        }
+
+        return new CloudNativePgClusterSnapshot(
             CloudNativePgClusterSpec.BuildClusterName(tenantId),
             options.Namespace,
-            "99999999-8888-7777-6666-555555555555",
+            uid ?? "99999999-8888-7777-6666-555555555555",
             1,
             null,
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                [CloudNativePgClusterSpec.ManagedByLabelKey] = CloudNativePgClusterSpec.ManagedByLabelValue,
-                [CloudNativePgClusterSpec.TenantIdLabelKey] = tenantId.ToString("D"),
-                [CloudNativePgClusterSpec.OperationIdLabelKey] = operationId.ToString("D")
-            },
+            labels,
             options.Instances,
             options.ImageName,
             options.StorageClass,
@@ -369,6 +480,7 @@ public sealed class CloudNativePgWorkerIntegrationTests(PostgreSqlFixture fixtur
             readyStatus,
             "ClusterIsReady",
             1);
+    }
 
     private sealed class MutableTimeProvider(DateTimeOffset initialUtc) : TimeProvider
     {

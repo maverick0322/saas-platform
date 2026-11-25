@@ -97,6 +97,7 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
                 await WaitForReadinessAsync(
                     context,
                     clusterName,
+                    expectedUid: null,
                     pollImmediatelyFirst: true,
                     cancellationToken),
 
@@ -158,6 +159,7 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
                 return await WaitForReadinessAsync(
                     context,
                     clusterName,
+                    expectedUid: string.IsNullOrWhiteSpace(snapshot.Uid) ? null : snapshot.Uid.Trim(),
                     pollImmediatelyFirst: false,
                     cancellationToken);
 
@@ -169,6 +171,7 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
     private async Task<ProvisioningStageResult> WaitForReadinessAsync(
         ProvisioningStageContext context,
         string clusterName,
+        string? expectedUid,
         bool pollImmediatelyFirst,
         CancellationToken cancellationToken)
     {
@@ -194,6 +197,14 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
                 await Task.Delay(delay, timeProvider, cancellationToken);
             }
 
+            if (timeProvider.GetUtcNow() >= deadlineUtc)
+            {
+                return new ProvisioningStageResult(
+                    ProvisioningStageOutcomeKind.TransientFailure,
+                    ErrorCode: "CNPG_WAIT",
+                    ErrorSummary: "CloudNativePG cluster is still reconciling and did not reach Ready state within the cycle wait window.");
+            }
+
             pollImmediately = false;
             var pollResult = await clusterClient.GetClusterAsync(options.Namespace, clusterName, cancellationToken);
 
@@ -201,6 +212,24 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
             {
                 case CloudNativePgGetStatus.Found:
                 {
+                    var observedUid = string.IsNullOrWhiteSpace(pollResult.Snapshot!.Uid)
+                        ? null
+                        : pollResult.Snapshot!.Uid!.Trim();
+                    if (expectedUid is not null && !string.Equals(observedUid, expectedUid, StringComparison.Ordinal))
+                    {
+                        logger.LogWarning(
+                            "CloudNativePG cluster {Namespace}/{ClusterName} changed UID during reconciliation for tenant {TenantId}; stopping operation.",
+                            options.Namespace,
+                            clusterName,
+                            context.TenantId);
+                        return new ProvisioningStageResult(
+                            ProvisioningStageOutcomeKind.TerminalFailure,
+                            ErrorCode: "CNPG_CLUSTER_IDENTITY_MISMATCH",
+                            ErrorSummary: "CloudNativePG cluster UID changed during reconciliation; operation stopped for administrative review.");
+                    }
+
+                    expectedUid ??= observedUid;
+
                     var evaluation = CloudNativePgClusterEvaluator.Evaluate(pollResult.Snapshot!, context, options);
                     switch (evaluation.Kind)
                     {

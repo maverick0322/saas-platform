@@ -447,6 +447,141 @@ public sealed class CloudNativePgAdapterTests
         Assert.Equal(CloudNativePgCreateStatus.TerminalError, KubernetesCloudNativePgClusterClient.MapCreateHttpStatus(HttpStatusCode.UnprocessableEntity).Status);
     }
 
+    [Fact]
+    public void Evaluator_RequiresExactProvisioningOperationIdLabel()
+    {
+        var options = new CloudNativePgOptions();
+        var context = CreateStageContext(ProvisioningStage.InfrastructureInstance);
+
+        var missingOperationLabel = BuildSnapshot(options, context, includeOperationLabel: false);
+        var missingEval = CloudNativePgClusterEvaluator.Evaluate(missingOperationLabel, context, options);
+        Assert.Equal(CloudNativePgClusterEvaluationKind.TerminalConflict, missingEval.Kind);
+        Assert.Equal("CNPG_CLUSTER_OWNERSHIP_CONFLICT", missingEval.ErrorCode);
+
+        var mismatchedOperationLabel = BuildSnapshot(options, context, operationLabel: Guid.NewGuid().ToString("D"));
+        var mismatchEval = CloudNativePgClusterEvaluator.Evaluate(mismatchedOperationLabel, context, options);
+        Assert.Equal(CloudNativePgClusterEvaluationKind.TerminalConflict, mismatchEval.Kind);
+        Assert.Equal("CNPG_CLUSTER_OWNERSHIP_CONFLICT", mismatchEval.ErrorCode);
+
+        var matchingOperationLabel = BuildSnapshot(options, context);
+        var validEval = CloudNativePgClusterEvaluator.Evaluate(matchingOperationLabel, context, options);
+        Assert.Equal(CloudNativePgClusterEvaluationKind.Ready, validEval.Kind);
+        Assert.Equal("saas-tenant-databases/pg-11111111222233334444555555555555@99999999-8888-7777-6666-555555555555", validEval.TechnicalReference);
+    }
+
+    [Fact]
+    public async Task Executor_StopsWithTerminalFailureWhenClusterUidChangesDuringReconciliation()
+    {
+        var options = CreateFastOptions();
+        var context = CreateStageContext(ProvisioningStage.InfrastructureInstance);
+        const string uidA = "11111111-aaaa-1111-aaaa-111111111111";
+        const string uidB = "22222222-bbbb-2222-bbbb-222222222222";
+
+        var reconcilingUidA = BuildSnapshot(options, context, uid: uidA, readyInstances: 0, phase: "Setting up primary", readyConditionStatus: "False");
+        var readyUidB = BuildSnapshot(options, context, uid: uidB);
+
+        // Escenario A: Cluster preexistente en reconciliacion cambia de UID en el siguiente sondeo
+        var getQueue = new Queue<CloudNativePgGetResult>(
+        [
+            CloudNativePgGetResult.FoundCluster(reconcilingUidA),
+            CloudNativePgGetResult.FoundCluster(readyUidB)
+        ]);
+        var adoptClient = new StubCloudNativePgClusterClient(
+            () => getQueue.Dequeue(),
+            () => throw new InvalidOperationException("Create not expected."));
+        var adoptExecutor = new CloudNativePgProvisioningStageExecutor(
+            adoptClient,
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance);
+
+        var adoptOutcome = await adoptExecutor.ExecuteStageAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TerminalFailure, adoptOutcome.Outcome);
+        Assert.Equal("CNPG_CLUSTER_IDENTITY_MISMATCH", adoptOutcome.ErrorCode);
+        Assert.Equal(0, adoptClient.CreateCalls);
+
+        // Escenario B: CREATE devuelve UID A y durante espera aparece UID B
+        var responses = new Queue<CloudNativePgGetResult>(
+        [
+            CloudNativePgGetResult.Missing(),
+            CloudNativePgGetResult.FoundCluster(readyUidB)
+        ]);
+        var createClient = new StubCloudNativePgClusterClient(
+            () => responses.Dequeue(),
+            () => CloudNativePgCreateResult.CreatedCluster(reconcilingUidA));
+
+        var createExecutor = new CloudNativePgProvisioningStageExecutor(
+            createClient,
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance);
+
+        var createOutcome = await createExecutor.ExecuteStageAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TerminalFailure, createOutcome.Outcome);
+        Assert.Equal("CNPG_CLUSTER_IDENTITY_MISMATCH", createOutcome.ErrorCode);
+        Assert.Equal(1, createClient.CreateCalls);
+    }
+
+    [Fact]
+    public async Task Executor_DoesNotStartNewPollAfterReadinessWindowExpires()
+    {
+        var context = CreateStageContext(ProvisioningStage.InfrastructureInstance);
+        var options = new CloudNativePgOptions
+        {
+            ApiCallTimeoutSeconds = 2,
+            ReadinessTimeoutSeconds = 1,
+            ReadinessPollIntervalSeconds = 1
+        };
+        var reconciling = BuildSnapshot(options, context, readyInstances: 0, phase: "Setting up primary", readyConditionStatus: "False");
+
+        // Con Timeout=1s y PollInterval=1s, tras la espera de 1s el plazo ya vencio y no debe iniciar un segundo GET
+        var strictClient = new StubCloudNativePgClusterClient(
+            () => CloudNativePgGetResult.FoundCluster(reconciling),
+            () => throw new InvalidOperationException("Create not expected."));
+        var strictExecutor = new CloudNativePgProvisioningStageExecutor(
+            strictClient,
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance);
+
+        var strictResult = await strictExecutor.ExecuteStageAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TransientFailure, strictResult.Outcome);
+        Assert.Equal("CNPG_WAIT", strictResult.ErrorCode);
+        Assert.Equal(1, strictClient.GetCalls);
+
+        // Si el reloj avanza mas alla del limite durante un poll previo, tampoco inicia otro GET
+        var clock = new TestAdvanceTimeProvider(new DateTimeOffset(2026, 11, 25, 14, 0, 0, TimeSpan.Zero));
+        var twoStepOptions = new CloudNativePgOptions
+        {
+            ApiCallTimeoutSeconds = 2,
+            ReadinessTimeoutSeconds = 2,
+            ReadinessPollIntervalSeconds = 1
+        };
+        var pollCount = 0;
+        var windowClient = new StubCloudNativePgClusterClient(
+            () =>
+            {
+                pollCount++;
+                if (pollCount == 2)
+                {
+                    clock.Advance(TimeSpan.FromSeconds(5));
+                }
+
+                return CloudNativePgGetResult.FoundCluster(reconciling);
+            },
+            () => throw new InvalidOperationException("Create not expected."));
+        var windowExecutor = new CloudNativePgProvisioningStageExecutor(
+            windowClient,
+            twoStepOptions,
+            clock,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance);
+
+        var windowResult = await windowExecutor.ExecuteStageAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TransientFailure, windowResult.Outcome);
+        Assert.Equal("CNPG_WAIT", windowResult.ErrorCode);
+        Assert.Equal(2, windowClient.GetCalls);
+    }
+
     private static CloudNativePgOptions CreateFastOptions()
         => new()
         {
@@ -477,6 +612,8 @@ public sealed class CloudNativePgAdapterTests
         string? managedBy = CloudNativePgClusterSpec.ManagedByLabelValue,
         string? tenantLabel = null,
         string? operationLabel = null,
+        bool includeOperationLabel = true,
+        string? uid = null,
         int? instances = null,
         string? storageSize = null,
         string? cpuRequest = null,
@@ -495,12 +632,15 @@ public sealed class CloudNativePgAdapterTests
         }
 
         labels[CloudNativePgClusterSpec.TenantIdLabelKey] = tenantLabel ?? context.TenantId.ToString("D");
-        labels[CloudNativePgClusterSpec.OperationIdLabelKey] = operationLabel ?? context.OperationId.ToString("D");
+        if (includeOperationLabel)
+        {
+            labels[CloudNativePgClusterSpec.OperationIdLabelKey] = operationLabel ?? context.OperationId.ToString("D");
+        }
 
         return new CloudNativePgClusterSnapshot(
             CloudNativePgClusterSpec.BuildClusterName(context.TenantId),
             options.Namespace,
-            "99999999-8888-7777-6666-555555555555",
+            uid ?? "99999999-8888-7777-6666-555555555555",
             generation,
             deletionTimestamp,
             labels,
@@ -553,5 +693,14 @@ public sealed class CloudNativePgAdapterTests
             CreateCalls++;
             return Task.FromResult(onCreate());
         }
+    }
+
+    private sealed class TestAdvanceTimeProvider(DateTimeOffset initialUtc) : TimeProvider
+    {
+        private DateTimeOffset _utcNow = initialUtc;
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan delta) => _utcNow = _utcNow.Add(delta);
     }
 }

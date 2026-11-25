@@ -66,13 +66,14 @@ internal static class CloudNativePgClusterEvaluator
                 ErrorSummary: "Existing cluster belongs to a different tenant identifier and cannot be adopted.");
         }
 
-        if (snapshot.Labels.TryGetValue(CloudNativePgClusterSpec.OperationIdLabelKey, out var operationLabel)
-            && !string.Equals(operationLabel, context.OperationId.ToString("D"), StringComparison.Ordinal))
+        var expectedOperationId = context.OperationId.ToString("D");
+        if (!snapshot.Labels.TryGetValue(CloudNativePgClusterSpec.OperationIdLabelKey, out var operationLabel)
+            || !string.Equals(operationLabel, expectedOperationId, StringComparison.Ordinal))
         {
             return new CloudNativePgClusterEvaluation(
                 CloudNativePgClusterEvaluationKind.TerminalConflict,
                 ErrorCode: "CNPG_CLUSTER_OWNERSHIP_CONFLICT",
-                ErrorSummary: "Existing cluster is associated with a different provisioning operation and requires review.");
+                ErrorSummary: "Existing cluster is missing or has a mismatched provisioning operation identity and cannot be adopted.");
         }
 
         if (!string.IsNullOrWhiteSpace(snapshot.DeletionTimestamp))
