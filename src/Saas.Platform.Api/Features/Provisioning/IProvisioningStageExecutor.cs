@@ -41,6 +41,10 @@ public interface IProvisioningStageExecutor
 {
     bool SupportsRealProvisioning { get; }
 
+    void ValidateStartupConfiguration()
+    {
+    }
+
     Task<ProvisioningStageResult> ExecuteStageAsync(
         ProvisioningStageContext context,
         CancellationToken cancellationToken);

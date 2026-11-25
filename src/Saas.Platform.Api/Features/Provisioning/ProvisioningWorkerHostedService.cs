@@ -28,6 +28,8 @@ public sealed class ProvisioningWorkerHostedService(
             return;
         }
 
+        stageExecutor.ValidateStartupConfiguration();
+
         var workerId = options.ResolveWorkerId();
         logger.LogInformation(
             "Provisioning worker {WorkerId} started with poll interval {PollIntervalSeconds}s.",
@@ -49,7 +51,10 @@ public sealed class ProvisioningWorkerHostedService(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Unexpected error during provisioning worker cycle for {WorkerId}.", workerId);
+                logger.LogError(
+                    "Unexpected error ({ExceptionType}) during provisioning worker cycle for {WorkerId}.",
+                    ex.GetType().Name,
+                    workerId);
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));

@@ -184,7 +184,29 @@ public static class PlatformHostFactory
         workerOptions.Validate();
 
         builder.Services.AddSingleton(workerOptions);
-        builder.Services.AddSingleton<IProvisioningStageExecutor, UnconfiguredProvisioningStageExecutor>();
+
+        switch (workerOptions.Mode)
+        {
+            case ProvisioningExecutionMode.Unconfigured:
+                builder.Services.AddSingleton<IProvisioningStageExecutor, UnconfiguredProvisioningStageExecutor>();
+                break;
+
+            case ProvisioningExecutionMode.CloudNativePg:
+            {
+                var cnpgOptions = new CloudNativePgOptions();
+                builder.Configuration.GetSection(CloudNativePgOptions.SectionName).Bind(cnpgOptions);
+                cnpgOptions.Validate();
+
+                builder.Services.AddSingleton(cnpgOptions);
+                builder.Services.AddSingleton<ICloudNativePgClusterClient, KubernetesCloudNativePgClusterClient>();
+                builder.Services.AddSingleton<IProvisioningStageExecutor, CloudNativePgProvisioningStageExecutor>();
+                break;
+            }
+
+            default:
+                throw new InvalidOperationException($"Unsupported ProvisioningWorker:Mode '{workerOptions.Mode}'.");
+        }
+
         builder.Services.AddScoped<ProvisioningLeaseStore>();
         builder.Services.AddScoped<ProvisioningOperationProcessor>();
         builder.Services.AddHostedService<ProvisioningWorkerHostedService>();
