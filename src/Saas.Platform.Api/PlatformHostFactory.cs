@@ -248,6 +248,7 @@ public static class PlatformHostFactory
             {
                 client.BaseAddress = identityBaseUri;
                 client.Timeout = TimeSpan.FromSeconds(identityAuthOptions.TimeoutSeconds);
+                client.MaxResponseContentBufferSize = IdentityMeAccountVerifier.MaxResponseBytes;
             })
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
             {

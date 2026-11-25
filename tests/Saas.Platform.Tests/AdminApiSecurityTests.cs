@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Saas.Platform.Api;
 using Saas.Platform.Api.Domain;
@@ -379,6 +380,192 @@ public sealed class AdminApiSecurityTests(PostgreSqlFixture fixture)
     }
 
     [Fact]
+    public async Task PostTenants_SlowHeadersSlowBodyBrokenBodyOversizedAndDuplicateKeys_Return503WithoutPersisting()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var dbConn = await CreateIsolatedMigratedDbAsync("me_integral_timeout", ct);
+        var subjectId = Guid.NewGuid();
+        var superAdminJwt = _tokens.CreateSuperAdminToken(subjectId: subjectId);
+
+        var bodyReadStarted = false;
+
+        async Task<HttpResponseMessage> PostViaHandlerAsync(
+            HttpMessageHandler handler,
+            string slug,
+            int timeoutSeconds = 1)
+        {
+            await using var host = await AdminTestHost.StartAsync(
+                dbConn,
+                _tokens.PublicKeyPem,
+                handler,
+                ct,
+                identityTimeoutSeconds: timeoutSeconds);
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, "/v1/tenants")
+            {
+                Content = new StringContent(
+                    $$"""{"publicId":"{{slug}}","name":"Clínica Timeout Fix","contactEmail":"c@tfix.test","initialAdminFullName":"Admin Fix","initialAdminEmail":"a@tfix.test","maxActiveAccounts":5}""",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", superAdminJwt);
+            return await host.Client.SendAsync(req, ct);
+        }
+
+        // 1. Delay before HTTP headers arrive -> 503 SERVICE_UNAVAILABLE
+        var slowHeadersResp = await PostViaHandlerAsync(
+            new SlowIdentityHttpHandler(TimeSpan.FromSeconds(3)),
+            "clinica-slow-headers",
+            timeoutSeconds: 1);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, slowHeadersResp.StatusCode);
+
+        // 2. HTTP 200 headers arrive immediately, but Stream.ReadAsync blocks beyond integral timeout -> 503 SERVICE_UNAVAILABLE
+        bodyReadStarted = false;
+        var slowBodyHandler = new StubIdentityHttpHandler(_ =>
+        {
+            var stream = new StallingOrFailingStream(
+                initialChunk: Encoding.UTF8.GetBytes($$"""{"id":"{{subjectId:D}}","""),
+                onSecondReadAsync: async token =>
+                {
+                    bodyReadStarted = true;
+                    await Task.Delay(TimeSpan.FromSeconds(5), token);
+                    return 0;
+                });
+
+            var msg = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(stream)
+            };
+            msg.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            return msg;
+        });
+
+        var slowBodyResp = await PostViaHandlerAsync(slowBodyHandler, "clinica-slow-body", timeoutSeconds: 1);
+        Assert.True(bodyReadStarted);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, slowBodyResp.StatusCode);
+
+        // 3. Transport interruption (IOException) while reading body after partial JSON -> 503 SERVICE_UNAVAILABLE
+        bodyReadStarted = false;
+        var brokenBodyHandler = new StubIdentityHttpHandler(_ =>
+        {
+            var stream = new StallingOrFailingStream(
+                initialChunk: Encoding.UTF8.GetBytes($$"""{"id":"{{subjectId:D}}","tenantId":null,"active":true"""),
+                onSecondReadAsync: _ =>
+                {
+                    bodyReadStarted = true;
+                    throw new IOException("Simulated socket reset mid-body.");
+                });
+
+            var msg = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(stream)
+            };
+            msg.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            return msg;
+        });
+
+        var brokenBodyResp = await PostViaHandlerAsync(brokenBodyHandler, "clinica-broken-body", timeoutSeconds: 2);
+        Assert.True(bodyReadStarted);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, brokenBodyResp.StatusCode);
+
+        // 4a. Response exceeding size limit (> 64 KiB) via streaming (no Content-Length) -> 503 SERVICE_UNAVAILABLE
+        var padding = new string('x', IdentityMeAccountVerifier.MaxResponseBytes + 1024);
+        var oversizedStreamingHandler = new StubIdentityHttpHandler(_ =>
+        {
+            var payload = Encoding.UTF8.GetBytes(
+                $$"""{"id":"{{subjectId:D}}","tenantId":null,"active":true,"role":"SUPER_ADMIN","pad":"{{padding}}"}""");
+            var msg = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new MemoryStream(payload))
+            };
+            msg.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            return msg;
+        });
+        var oversizedStreamResp = await PostViaHandlerAsync(oversizedStreamingHandler, "clinica-oversize-stream", timeoutSeconds: 2);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, oversizedStreamResp.StatusCode);
+
+        // 4b. Response exceeding size limit via Content-Length -> 503 SERVICE_UNAVAILABLE
+        var oversizedBufferedHandler = new StubIdentityHttpHandler(_ => JsonOk(
+            $$"""{"id":"{{subjectId:D}}","tenantId":null,"active":true,"role":"SUPER_ADMIN","pad":"{{padding}}"}"""));
+        var oversizedBufferedResp = await PostViaHandlerAsync(oversizedBufferedHandler, "clinica-oversize-len", timeoutSeconds: 2);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, oversizedBufferedResp.StatusCode);
+
+        // 5. Duplicated or ambiguous security properties -> 503 SERVICE_UNAVAILABLE
+        var duplicateKeyPayloads = new[]
+        {
+            $$"""{"id":"{{Guid.NewGuid():D}}","id":"{{subjectId:D}}","tenantId":null,"active":true,"role":"SUPER_ADMIN"}""",
+            $$"""{"id":"{{subjectId:D}}","tenantId":null,"active":false,"active":true,"role":"SUPER_ADMIN"}""",
+            $$"""{"id":"{{subjectId:D}}","tenantId":"{{Guid.NewGuid():D}}","tenantId":null,"active":true,"role":"SUPER_ADMIN"}""",
+            $$"""{"id":"{{subjectId:D}}","tenantId":null,"active":true,"role":"ADMIN_CLINICA","role":"SUPER_ADMIN"}""",
+            $$"""{"id":"{{subjectId:D}}","tenantId":null,"active":false,"Active":true,"role":"SUPER_ADMIN"}"""
+        };
+
+        foreach (var payload in duplicateKeyPayloads)
+        {
+            var dupResp = await PostViaHandlerAsync(
+                new StubIdentityHttpHandler(_ => JsonOk(payload)),
+                "clinica-dup-keys",
+                timeoutSeconds: 2);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, dupResp.StatusCode);
+            using var errDoc = JsonDocument.Parse(await dupResp.Content.ReadAsStringAsync(ct));
+            Assert.Equal("SERVICE_UNAVAILABLE", errDoc.RootElement.GetProperty("code").GetString());
+        }
+
+        // Verify ALL rejections left tenants and tenant_provisioning_operations completely empty
+        await using (var verifyCtx = fixture.CreateDbContext(dbConn))
+        {
+            Assert.Equal(0, await verifyCtx.Tenants.CountAsync(ct));
+            Assert.Equal(0, await verifyCtx.TenantProvisioningOperations.CountAsync(ct));
+        }
+
+        // 6. Valid Identity response continues allowing tenant registration -> 201 Created
+        var validResp = await PostViaHandlerAsync(
+            new StubIdentityHttpHandler(_ => JsonOk($$"""{"id":"{{subjectId:D}}","tenantId":null,"active":true,"role":"SUPER_ADMIN"}""")),
+            "clinica-fix-valid-01",
+            timeoutSeconds: 2);
+        Assert.Equal(HttpStatusCode.Created, validResp.StatusCode);
+
+        await using (var verifyCtxAfter = fixture.CreateDbContext(dbConn))
+        {
+            Assert.Equal(1, await verifyCtxAfter.Tenants.CountAsync(ct));
+            Assert.Equal(1, await verifyCtxAfter.TenantProvisioningOperations.CountAsync(ct));
+        }
+    }
+
+    [Fact]
+    public async Task IdentityMeAccountVerifier_DistinguishesCallerCancellationFromInternalTimeout()
+    {
+        var subjectId = Guid.NewGuid();
+        using var delayHandler = new SlowIdentityHttpHandler(TimeSpan.FromSeconds(5));
+        using var httpClient = new HttpClient(delayHandler)
+        {
+            BaseAddress = new Uri("http://identity.test.local/"),
+            Timeout = TimeSpan.FromSeconds(5),
+            MaxResponseContentBufferSize = IdentityMeAccountVerifier.MaxResponseBytes
+        };
+
+        var verifier = new IdentityMeAccountVerifier(httpClient, NullLogger<IdentityMeAccountVerifier>.Instance);
+        using var callerCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            verifier.VerifySuperAdminAsync(subjectId, "synthetic.jwt.token", callerCts.Token));
+
+        using var shortTimeoutClient = new HttpClient(delayHandler)
+        {
+            BaseAddress = new Uri("http://identity.test.local/"),
+            Timeout = TimeSpan.FromMilliseconds(100),
+            MaxResponseContentBufferSize = IdentityMeAccountVerifier.MaxResponseBytes
+        };
+
+        var timeoutVerifier = new IdentityMeAccountVerifier(shortTimeoutClient, NullLogger<IdentityMeAccountVerifier>.Instance);
+        var outcome = await timeoutVerifier.VerifySuperAdminAsync(
+            subjectId,
+            "synthetic.jwt.token",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(IdentityAccountVerificationOutcome.Unavailable, outcome);
+    }
+
+    [Fact]
     public void ControlledSummaryCatalogAndDatabaseClassifier_EnforceStrictBoundaries()
     {
         var summary = ProvisioningAdministrativeErrorCatalog.ResolveControlledSummary(
@@ -501,5 +688,40 @@ public sealed class AdminApiSecurityTests(PostgreSqlFixture fixture)
             await Task.Delay(delay, cancellationToken);
             return JsonOk("{}");
         }
+    }
+
+    private sealed class StallingOrFailingStream(
+        byte[] initialChunk,
+        Func<CancellationToken, Task<int>> onSecondReadAsync) : Stream
+    {
+        private int _offset;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_offset < initialChunk.Length)
+            {
+                var toCopy = Math.Min(buffer.Length, initialChunk.Length - _offset);
+                initialChunk.AsMemory(_offset, toCopy).CopyTo(buffer);
+                _offset += toCopy;
+                return ValueTask.FromResult(toCopy);
+            }
+
+            return new ValueTask<int>(onSecondReadAsync(cancellationToken));
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 }
