@@ -29,13 +29,16 @@ Ver [`ADR-0001`](docs/adr/ADR-0001-vertical-slice-platform.md), [`ADR-0002`](doc
 
 Estados operativos del tenant (`PENDIENTE_ADMIN`, `ACTIVA`, `SUSPENDIDA`) incorporados en el modelo de dominio y catálogo global de **PLAT-02A** (toda clínica inicia en `PENDIENTE_ADMIN`). `Identity READY` es **necesario pero no suficiente** para pasar a `ACTIVA` (`ADR-0002` / `ADR-0003`); a partir de **PLAT-03A**, la API expone opcionalmente la consulta gRPC interna `TenantAccessService.GetTenantAccessState` (v1), manteniendo fuera de alcance la activación efectiva, las rutas HTTP administrativas y los adaptadores externos del trabajador.
 
-## Contrato HTTP administrativo candidato (`PLAT-04A`)
+## Contrato HTTP administrativo (`PLAT-04A` / `PLAT-04B`)
 
-- Especificación técnica: [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) (**candidato v1** ajustado con `D-HTTP-01` a `D-HTTP-06` para aprobación formal previa a `PLAT-04B`).
+- Especificación técnica: [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) (**candidato v1** con `D-HTTP-01` a `D-HTTP-06` adoptadas en **PLAT-04B**).
 - Especificación OpenAPI (`3.0.3`): [`platform-admin.v1.yaml`](docs/contracts/openapi/platform-admin.v1.yaml).
-- Define exclusivamente `POST /v1/tenants` (JWT `RS256` local + verificación síncrona vía `GET /v1/auth/me` en Identity y `409` con `existingTenantId`), `GET /v1/tenants` y `GET /v1/tenants/{tenantId}` (validación JWT `RS256` local) restringidos a `SUPER_ADMIN` bajo `IDENTITY-SEC-01`. En código todavía no se exponen endpoints HTTP administrativos ni middleware JWT.
+- **Habilitación explícita y segura por configuración (`AdminApi:Enabled`):** por defecto `false` (no expone rutas `/v1/tenants*`, preservando despliegues previos y `/health/*`). Cuando `AdminApi:Enabled=true`:
+  - Requiere **exclusivamente clave pública RSA ≥ 2048 bits** en formato PEM `SubjectPublicKeyInfo` vía `Jwt:PublicKeyPem` o `Jwt:PublicKeyPemPath` (archivo montado recomendado en Kubernetes), `Jwt:Issuer=saas-identity`, `Jwt:Audience=vital-saas`, y rechaza arranque si existen secretos prohibidos (`Jwt:PrivateKeyPem`, `Jwt:PrivateKeyPemPath`, `Jwt:RefreshTokenHmacKey`, `Jwt:SigningKey`).
+  - Exige JWT `RS256` (`ClockSkew=30s`, `MapInboundClaims=false`, `RoleClaimType=role`, `sub` UUID no vacío, `role=SUPER_ADMIN` sin `tenant_id`) y responde `401 Unauthorized` (`WWW-Authenticate: Bearer`) vs `403 Forbidden`.
+  - Requiere `IdentityAuth:BaseAddress` y `IdentityAuth:TimeoutSeconds` (default `3`s) para verificar vigencia y rol global en `GET /v1/auth/me` antes de `POST /v1/tenants` (fallo cerrado `503` sin ejecutar aprovisionamiento síncrono de CloudNativePG, Clinical ni `ProvisionInitialClinicAdmin`).
 
-## Estructura actual (PLAT-03A)
+## Estructura actual (PLAT-04B)
 
 ```text
 Saas.Platform.sln
@@ -60,6 +63,15 @@ src/
         ProvisioningWorkerOptions.cs
         UnconfiguredProvisioningStageExecutor.cs
       Tenants/
+        AdminHttp/
+          AdminApiOptions.cs
+          AdminIdentityClaimsValidator.cs
+          AdminProblemDetailsWriter.cs
+          IdentityMeAccountVerifier.cs
+          IIdentityAccountVerifier.cs
+          ProvisioningAdministrativeErrorCatalog.cs
+          TenantAdminEndpoints.cs
+          TenantAdminHttpModels.cs
         GetTenantAccessState/
           GetTenantAccessStateHandler.cs
           GetTenantAccessStateQuery.cs
@@ -71,6 +83,10 @@ src/
           GetTenantByIdQuery.cs
           TenantDetails.cs
           TenantProvisioningSummary.cs
+        ListTenants/
+          ListTenantsHandler.cs
+          ListTenantsQuery.cs
+          ListTenantsResult.cs
         RegisterTenant/
           RegisterTenantCommand.cs
           RegisterTenantHandler.cs
@@ -99,6 +115,8 @@ src/
     Properties/launchSettings.json
 tests/
   Saas.Platform.Tests/
+    AdminApiSecurityTests.cs
+    AdminHttpPostgreSqlIntegrationTests.cs
     HealthEndpointsTests.cs
     MutableTimeProvider.cs
     PostgreSqlFixture.cs
@@ -108,13 +126,19 @@ tests/
     TenantCatalogIntegrationTests.cs
     TenantDomainValidationTests.cs
     TenantProvisioningIntegrationTests.cs
+    TestJwtTokenFactory.cs
     Saas.Platform.Tests.csproj
 Dockerfile
 .dockerignore
 .github/workflows/ci.yml
 ```
 
-Las operaciones administrativas de catálogo (`RegisterTenant`, `GetTenantById`) están implementadas como **Vertical Slices** internos probables de forma autónoma. **No se exponen endpoints HTTP administrativos** en PLAT-01 / PLAT-02A / PLAT-02C / PLAT-03A porque la autenticación definitiva de SuperAdmin sigue pendiente; no se publican rutas administrativas anónimas ni se aceptan encabezados no confiables como prueba de identidad.
+### API HTTP administrativa protegida (`PLAT-04B`)
+
+Las rutas `POST /v1/tenants`, `GET /v1/tenants` y `GET /v1/tenants/{tenantId}` permanecen deshabilitadas por defecto (`AdminApi:Enabled=false`). Al habilitarlas (`AdminApi__Enabled=true`), requieren:
+- `Jwt__PublicKeyPem` o `Jwt__PublicKeyPemPath` (clave pública RSA `>= 2048` bits únicamente), `Jwt__Issuer` (`saas-identity`) y `Jwt__Audience` (`vital-saas`).
+- `IdentityAuth__BaseAddress` y `IdentityAuth__TimeoutSeconds` (`3` segundos por defecto) para la comprobación de cuenta activa global `SUPER_ADMIN` vía `GET /v1/auth/me` previa a `POST /v1/tenants` (`D-HTTP-01`).
+- Decisiones `D-HTTP-01` a `D-HTTP-06` de [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) implementadas para Platform (sin extenderlas unilateralmente a otros microservicios).
 
 ### Servidor gRPC interno Platform–Identity (`PLAT-03A`)
 
@@ -238,7 +262,8 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **PLAT-02C (núcleo durable del trabajador de aprovisionamiento):** adquisición atómica PostgreSQL con *lease* y *fencing* (`lease_version`), progreso durable por etapa, reintentos limitados con espera exponencial, migración incremental (`20261124070500_AddProvisioningWorkerLeaseAndStageProgress`) y host `Worker` separado de la API pública, deshabilitado por defecto y con adaptador `UnconfiguredProvisioningStageExecutor` (sin CloudNativePG, gRPC Identity, Clinical ni activación efectiva todavía).
 - **PLAT-03A (servidor gRPC de estado operativo Platform–Identity):** implementación de `TenantAccessService.GetTenantAccessState` sobre HTTP/2 (`h2c`, puerto candidato `8092`) separado del tráfico HTTP/1.1 (`8080`), autenticación `x-internal-service-key` en tiempo constante, cuota configurable por clínica (`max_active_accounts`, migración `20261124093133_AddTenantMaxActiveAccounts`) y fallo cerrado sin alterar el `.proto` v1 ni el modo `Worker`.
 - **PLAT-03B (validación en vivo Platform–Identity, `PASS`):** verificación de extremo a extremo vía gRPC HTTP/2 entre `saas-platform` (`0cd248f`) y `Eugene1805/saas-identity` (`a71c1e7`) con `Platform__Mode=Grpc` y bases PostgreSQL sintéticas desechables ([evidencia PLAT-03B](docs/PLAT-03B-VALIDATION.md)).
-- **PLAT-04A (documental, contrato HTTP administrativo candidato):** definición y ajuste de [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) y [`platform-admin.v1.yaml`](docs/contracts/openapi/platform-admin.v1.yaml) (`POST /v1/tenants`, `GET /v1/tenants`, `GET /v1/tenants/{tenantId}`, JWT `RS256` `IDENTITY-SEC-01`, `D-HTTP-01` vía `GET /v1/auth/me` en alta, `409` con `existingTenantId`, RFC 9457 `ProblemDetails`) en PR #16 pendiente de ratificación para `PLAT-04B`, sin implementación de endpoints ni middleware todavía.
+- **PLAT-04A (documental, contrato HTTP administrativo candidato):** definición y ajuste de [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) y [`platform-admin.v1.yaml`](docs/contracts/openapi/platform-admin.v1.yaml) (`POST /v1/tenants`, `GET /v1/tenants`, `GET /v1/tenants/{tenantId}`, JWT `RS256` `IDENTITY-SEC-01`, `D-HTTP-01` vía `GET /v1/auth/me` en alta, `409` con `existingTenantId`, RFC 9457 `ProblemDetails`) integrados en `develop` (PR #16).
+- **PLAT-04B (API HTTP administrativa de Platform):** implementación de `POST /v1/tenants`, `GET /v1/tenants` (`ListTenants`) y `GET /v1/tenants/{tenantId}` bajo `AdminApi:Enabled` (`false` por defecto), validación local JWT `RS256` (`IDENTITY-SEC-01`, sin secretos privados/HMAC), política `SUPER_ADMIN` (`401` con `WWW-Authenticate` vs `403`), comprobación síncrona de vigencia en `GET /v1/auth/me` previa al alta (`D-HTTP-01`), conflicto `409` con `existingTenantId` (`D-HTTP-03`) y mensajes administrativos controlados (`lastErrorSummary`) verificados con PostgreSQL real y dobles HTTP de Identity (integración en vivo con `saas-identity` diferida a `PLAT-04C`).
 - **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
   - **LAB-07:** `PASS LOCAL`.
   - **LAB-08:** `PASS LOCAL`.
