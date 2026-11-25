@@ -31,9 +31,9 @@ Estados operativos del tenant (`PENDIENTE_ADMIN`, `ACTIVA`, `SUSPENDIDA`) incorp
 
 ## Contrato HTTP administrativo candidato (`PLAT-04A`)
 
-- Especificación técnica: [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) (**candidato v1**, pendiente de revisión/ratificación previa a `PLAT-04B`).
+- Especificación técnica: [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) (**candidato v1** ajustado con `D-HTTP-01` a `D-HTTP-06` para aprobación formal previa a `PLAT-04B`).
 - Especificación OpenAPI (`3.0.3`): [`platform-admin.v1.yaml`](docs/contracts/openapi/platform-admin.v1.yaml).
-- Define exclusivamente `POST /v1/tenants`, `GET /v1/tenants` y `GET /v1/tenants/{tenantId}` restringidos a `SUPER_ADMIN` bajo `IDENTITY-SEC-01` (JWT Bearer `RS256`). En código todavía no se exponen endpoints HTTP administrativos ni middleware JWT.
+- Define exclusivamente `POST /v1/tenants` (JWT `RS256` local + verificación síncrona vía `GET /v1/auth/me` en Identity y `409` con `existingTenantId`), `GET /v1/tenants` y `GET /v1/tenants/{tenantId}` (validación JWT `RS256` local) restringidos a `SUPER_ADMIN` bajo `IDENTITY-SEC-01`. En código todavía no se exponen endpoints HTTP administrativos ni middleware JWT.
 
 ## Estructura actual (PLAT-03A)
 
@@ -238,7 +238,7 @@ Ver [convenciones Git/CI/CD](docs/engineering/GIT-CI-CD.md), [alcance APP-00](do
 - **PLAT-02C (núcleo durable del trabajador de aprovisionamiento):** adquisición atómica PostgreSQL con *lease* y *fencing* (`lease_version`), progreso durable por etapa, reintentos limitados con espera exponencial, migración incremental (`20261124070500_AddProvisioningWorkerLeaseAndStageProgress`) y host `Worker` separado de la API pública, deshabilitado por defecto y con adaptador `UnconfiguredProvisioningStageExecutor` (sin CloudNativePG, gRPC Identity, Clinical ni activación efectiva todavía).
 - **PLAT-03A (servidor gRPC de estado operativo Platform–Identity):** implementación de `TenantAccessService.GetTenantAccessState` sobre HTTP/2 (`h2c`, puerto candidato `8092`) separado del tráfico HTTP/1.1 (`8080`), autenticación `x-internal-service-key` en tiempo constante, cuota configurable por clínica (`max_active_accounts`, migración `20261124093133_AddTenantMaxActiveAccounts`) y fallo cerrado sin alterar el `.proto` v1 ni el modo `Worker`.
 - **PLAT-03B (validación en vivo Platform–Identity, `PASS`):** verificación de extremo a extremo vía gRPC HTTP/2 entre `saas-platform` (`0cd248f`) y `Eugene1805/saas-identity` (`a71c1e7`) con `Platform__Mode=Grpc` y bases PostgreSQL sintéticas desechables ([evidencia PLAT-03B](docs/PLAT-03B-VALIDATION.md)).
-- **PLAT-04A (documental, contrato HTTP administrativo candidato):** definición de [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) y [`platform-admin.v1.yaml`](docs/contracts/openapi/platform-admin.v1.yaml) (`POST /v1/tenants`, `GET /v1/tenants`, `GET /v1/tenants/{tenantId}`, JWT `RS256` `IDENTITY-SEC-01`, RFC 9457 `ProblemDetails`) pendientes de ratificación para `PLAT-04B`, sin implementación de endpoints ni middleware todavía.
+- **PLAT-04A (documental, contrato HTTP administrativo candidato):** definición y ajuste de [`PLATFORM_ADMIN_HTTP_v1.md`](docs/contracts/PLATFORM_ADMIN_HTTP_v1.md) y [`platform-admin.v1.yaml`](docs/contracts/openapi/platform-admin.v1.yaml) (`POST /v1/tenants`, `GET /v1/tenants`, `GET /v1/tenants/{tenantId}`, JWT `RS256` `IDENTITY-SEC-01`, `D-HTTP-01` vía `GET /v1/auth/me` en alta, `409` con `existingTenantId`, RFC 9457 `ProblemDetails`) en PR #16 pendiente de ratificación para `PLAT-04B`, sin implementación de endpoints ni middleware todavía.
 - **Infraestructura (`saas-infra`, commit `819480a` según el último handoff):**
   - **LAB-07:** `PASS LOCAL`.
   - **LAB-08:** `PASS LOCAL`.
