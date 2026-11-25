@@ -187,22 +187,22 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
                 var remaining = deadlineUtc - timeProvider.GetUtcNow();
                 if (remaining <= TimeSpan.Zero)
                 {
-                    return new ProvisioningStageResult(
-                        ProvisioningStageOutcomeKind.TransientFailure,
-                        ErrorCode: "CNPG_WAIT",
-                        ErrorSummary: "CloudNativePG cluster is still reconciling and did not reach Ready state within the cycle wait window.");
+                    return CreateWaitTimeoutResult();
                 }
 
-                var delay = remaining < options.ReadinessPollInterval ? remaining : options.ReadinessPollInterval;
+                var delay = remaining <= options.ReadinessPollInterval ? remaining : options.ReadinessPollInterval;
                 await Task.Delay(delay, timeProvider, cancellationToken);
-            }
 
-            if (timeProvider.GetUtcNow() >= deadlineUtc)
+                // Si solo restaba <= un intervalo o la ventana ya vencio al despertar el timer,
+                // no iniciar una nueva consulta GET al borde/fuera de la ventana de disponibilidad.
+                if (delay >= remaining || timeProvider.GetUtcNow() >= deadlineUtc)
+                {
+                    return CreateWaitTimeoutResult();
+                }
+            }
+            else if (timeProvider.GetUtcNow() >= deadlineUtc)
             {
-                return new ProvisioningStageResult(
-                    ProvisioningStageOutcomeKind.TransientFailure,
-                    ErrorCode: "CNPG_WAIT",
-                    ErrorSummary: "CloudNativePG cluster is still reconciling and did not reach Ready state within the cycle wait window.");
+                return CreateWaitTimeoutResult();
             }
 
             pollImmediately = false;
@@ -288,4 +288,10 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
             }
         }
     }
+
+    private static ProvisioningStageResult CreateWaitTimeoutResult()
+        => new(
+            ProvisioningStageOutcomeKind.TransientFailure,
+            ErrorCode: "CNPG_WAIT",
+            ErrorSummary: "CloudNativePG cluster is still reconciling and did not reach Ready state within the cycle wait window.");
 }

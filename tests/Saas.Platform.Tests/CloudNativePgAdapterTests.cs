@@ -534,7 +534,7 @@ public sealed class CloudNativePgAdapterTests
         };
         var reconciling = BuildSnapshot(options, context, readyInstances: 0, phase: "Setting up primary", readyConditionStatus: "False");
 
-        // Con Timeout=1s y PollInterval=1s, tras la espera de 1s el plazo ya vencio y no debe iniciar un segundo GET
+        // Escenario 1: Con Timeout=1s y PollInterval=1s, tras esperar el intervalo vence la ventana sin iniciar otro GET (ni spin por jitter)
         var strictClient = new StubCloudNativePgClusterClient(
             () => CloudNativePgGetResult.FoundCluster(reconciling),
             () => throw new InvalidOperationException("Create not expected."));
@@ -549,7 +549,27 @@ public sealed class CloudNativePgAdapterTests
         Assert.Equal("CNPG_WAIT", strictResult.ErrorCode);
         Assert.Equal(1, strictClient.GetCalls);
 
-        // Si el reloj avanza mas alla del limite durante un poll previo, tampoco inicia otro GET
+        // Escenario 2: Si el reloj ya alcanzo el limite al concluir el GET inicial, tampoco espera ni emite otro GET
+        var expiredClock = new TestAdvanceTimeProvider(new DateTimeOffset(2026, 11, 25, 13, 55, 0, TimeSpan.Zero));
+        var expiredClient = new StubCloudNativePgClusterClient(
+            () =>
+            {
+                expiredClock.Advance(TimeSpan.FromSeconds(2));
+                return CloudNativePgGetResult.FoundCluster(reconciling);
+            },
+            () => throw new InvalidOperationException("Create not expected."));
+        var expiredExecutor = new CloudNativePgProvisioningStageExecutor(
+            expiredClient,
+            options,
+            expiredClock,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance);
+
+        var expiredResult = await expiredExecutor.ExecuteStageAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TransientFailure, expiredResult.Outcome);
+        Assert.Equal("CNPG_WAIT", expiredResult.ErrorCode);
+        Assert.Equal(1, expiredClient.GetCalls);
+
+        // Escenario 3: Si el reloj avanza mas alla del limite durante un poll previo, tampoco inicia otro GET
         var clock = new TestAdvanceTimeProvider(new DateTimeOffset(2026, 11, 25, 14, 0, 0, TimeSpan.Zero));
         var twoStepOptions = new CloudNativePgOptions
         {
