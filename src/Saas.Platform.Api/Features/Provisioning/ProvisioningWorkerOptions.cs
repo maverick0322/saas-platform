@@ -2,9 +2,15 @@ using Saas.Platform.Api.Domain;
 
 namespace Saas.Platform.Api.Features.Provisioning;
 
+public enum ProvisioningExecutionMode
+{
+    Unconfigured = 0,
+    CloudNativePg = 1
+}
+
 /// <summary>
-/// Configuración explícita del núcleo trabajador de aprovisionamiento.
-/// Permanece deshabilitado por defecto hasta contar con adaptadores reales y contratos ratificados.
+/// Configuración explícita del núcleo trabajador de aprovisionamiento (PLAT-02C / PLAT-05A).
+/// Permanece deshabilitado y sin adaptador externo activo por defecto hasta habilitar el modo correspondiente.
 /// </summary>
 public sealed class ProvisioningWorkerOptions
 {
@@ -14,6 +20,8 @@ public sealed class ProvisioningWorkerOptions
         $"platform-worker-{Environment.MachineName}-{Guid.NewGuid():N}"[..Math.Min(TenantProvisioningOperation.LeaseOwnerMaxLength, $"platform-worker-{Environment.MachineName}-".Length + 8)];
 
     public bool Enabled { get; set; }
+
+    public ProvisioningExecutionMode Mode { get; set; } = ProvisioningExecutionMode.Unconfigured;
 
     public int MaxAutomaticRetries { get; set; } = 3;
 
@@ -78,6 +86,11 @@ public sealed class ProvisioningWorkerOptions
         if (PollIntervalSeconds < 1)
         {
             throw new InvalidOperationException("ProvisioningWorker:PollIntervalSeconds must be >= 1.");
+        }
+
+        if (!Enum.IsDefined(Mode))
+        {
+            throw new InvalidOperationException("ProvisioningWorker:Mode must be a supported execution mode.");
         }
 
         var resolvedWorkerId = ResolveWorkerId();

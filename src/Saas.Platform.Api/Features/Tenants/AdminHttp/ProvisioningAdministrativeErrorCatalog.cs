@@ -28,8 +28,18 @@ internal static class ProvisioningAdministrativeErrorCatalog
                 "Identity could not deliver the initial administrator credentials and will require retry or verification.",
             "IDENTITY_TIMEOUT" or "IDENTITY_UNAVAILABLE" =>
                 "Identity is temporarily unavailable to complete initial administrator provisioning.",
-            "INFRASTRUCTURE_UNAVAILABLE" or "CNPG_WAIT" =>
+            "INFRASTRUCTURE_UNAVAILABLE" or "CNPG_WAIT" or "CNPG_API_UNAVAILABLE" =>
                 "Dedicated tenant database infrastructure is not ready yet.",
+            "CNPG_API_TIMEOUT_UNCERTAIN" or "CNPG_CREATE_TIMEOUT_UNCERTAIN" or "CNPG_CLUSTER_DISAPPEARED" =>
+                "Dedicated database provisioning timed out and requires state verification before retrying.",
+            "CNPG_RBAC_FORBIDDEN" or "CNPG_INVALID_MANIFEST" or "CNPG_CLUSTER_OWNERSHIP_CONFLICT"
+                or "CNPG_CLUSTER_IDENTITY_MISMATCH" or "CNPG_CLUSTER_DELETING" or "CNPG_CLUSTER_SPEC_MISMATCH"
+                or "CNPG_CLUSTER_UNRECOVERABLE" or "CNPG_INVALID_CLUSTER_PAYLOAD" or "CNPG_API_REJECTED" =>
+                "Dedicated database provisioning stopped due to a Kubernetes or CloudNativePG validation error and requires administrative review.",
+            "INVALID_TECHNICAL_REFERENCE" =>
+                "Infrastructure provisioning returned an invalid cluster reference and requires administrative verification.",
+            "ADAPTER_NOT_CONFIGURED" =>
+                "Initial provisioning progressed as far as currently configured adapters and is waiting for subsequent provisioning stages.",
             "SERVICE_DATABASES_ERROR" =>
                 "Required per-service database preparation failed and needs controlled recovery.",
             "CLINICAL_PREPARATION_ERROR" =>

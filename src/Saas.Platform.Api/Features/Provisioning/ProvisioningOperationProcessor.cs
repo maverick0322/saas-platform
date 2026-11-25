@@ -11,7 +11,8 @@ public enum ProvisioningCycleOutcome
     LeaseLost = 4,
     SimulatedRejected = 5,
     AdapterNotConfigured = 6,
-    AwaitingRealActivation = 7
+    AwaitingRealActivation = 7,
+    InvalidEvidence = 8
 }
 
 public sealed record ProvisioningCycleResult(
@@ -148,6 +149,36 @@ public sealed class ProvisioningOperationProcessor(
             {
                 case ProvisioningStageOutcomeKind.StageVerified:
                 {
+                    if (stageExecutor.SupportsRealProvisioning && stage == ProvisioningStage.InfrastructureInstance)
+                    {
+                        var isValidReference = false;
+                        try
+                        {
+                            var sanitizedReference = TenantProvisioningOperation.SanitizeTechnicalReference(
+                                stageResult.TechnicalReference);
+                            isValidReference = !string.IsNullOrWhiteSpace(sanitizedReference)
+                                && string.Equals(sanitizedReference, stageResult.TechnicalReference, StringComparison.Ordinal);
+                        }
+                        catch (ArgumentException)
+                        {
+                            isValidReference = false;
+                        }
+
+                        if (!isValidReference)
+                        {
+                            return await ReleaseRetryableFailureAsync(
+                                current,
+                                markStageVerificationRequired: stage,
+                                errorCode: "INVALID_TECHNICAL_REFERENCE",
+                                errorSummary: $"Confirmed stage '{stage.ToCode()}' did not provide a valid technical reference.",
+                                utcNow: afterStageUtc,
+                                forceManualIntervention: true,
+                                outcomeWhenReleased: ProvisioningCycleOutcome.InvalidEvidence,
+                                lastStage: stage,
+                                cancellationToken: cancellationToken);
+                        }
+                    }
+
                     var recorded = await leaseStore.TryRecordStageConfirmedAsync(
                         current.Token,
                         stage,
