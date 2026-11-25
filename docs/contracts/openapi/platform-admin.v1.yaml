@@ -1,0 +1,788 @@
+openapi: 3.0.3
+info:
+  title: Vital Platform Administrative HTTP API
+  version: 1.0.0-candidate
+  license:
+    name: Academic Project (SaaS Vital)
+  description: |
+    Contrato candidato v1 (PLAT-04A) para las operaciones HTTP administrativas de Platform
+    destinadas al frontend de SuperAdmin.
+
+    Estado normativo:
+    - Documento candidato pendiente de revision/ratificacion previa a PLAT-04B.
+    - No incluye suspension/reactivacion, edicion de cuotas, reintentos manuales ni activacion efectiva.
+    - Adopta IDENTITY-SEC-01 (JWT Bearer RS256 emitido exclusivamente por saas-identity,
+      iss=saas-identity, aud=vital-saas, ClockSkew=30s, MapInboundClaims=false, rol cerrado SUPER_ADMIN
+      y ausencia obligatoria del claim tenant_id).
+servers:
+  - url: http://127.0.0.1:8080
+    description: Desarrollo local directo de Saas.Platform.Api (equivalente a localhost:8080; en produccion expuesto tras Gateway con verificacion interna preservada)
+security:
+  - bearerAuth: []
+tags:
+  - name: Tenants
+    description: Catalogo global administrativo de clinicas y estado inicial de aprovisionamiento (exclusivo SUPER_ADMIN)
+paths:
+  /v1/tenants:
+    post:
+      tags:
+        - Tenants
+      summary: Registrar una nueva clinica en el catalogo global
+      description: |
+        Registra de forma atomica (transaccion ACID en la base global de Platform) una nueva clinica
+        en estado operativo `PENDIENTE_ADMIN` (`mayAuthenticate=false`) junto con su operacion durable inicial
+        de aprovisionamiento en estado `PENDING`.
+
+        No realiza llamadas sincronas obligatorias a Identity, Clinical ni CloudNativePG durante la peticion.
+        El codigo `201 Created` confirma exclusivamente la persistencia del registro y la intencion durable,
+        no la finalizacion del aprovisionamiento.
+      operationId: registerTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+            examples:
+              clinicaNorte:
+                summary: Alta administrativa valida de clinica sintetica
+                value:
+                  publicId: clinica-norte
+                  name: Clínica Norte
+                  contactEmail: contacto@clinica-norte.vital-demo.test
+                  initialAdminFullName: Dra. Sofía Navarro
+                  initialAdminEmail: admin.norte@clinica-norte.vital-demo.test
+                  maxActiveAccounts: 15
+      responses:
+        '201':
+          description: Clinica y operacion durable inicial creadas en la base global de Platform.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDetailsResponse'
+              examples:
+                createdPending:
+                  summary: Clinica recien registrada (PENDIENTE_ADMIN / PENDING)
+                  value:
+                    id: 019abc12-3456-7000-8000-000000000101
+                    publicId: clinica-norte
+                    name: Clínica Norte
+                    contactEmail: contacto@clinica-norte.vital-demo.test
+                    operationalState: PENDIENTE_ADMIN
+                    mayAuthenticate: false
+                    maxActiveAccounts: 15
+                    createdAtUtc: '2026-11-24T18:30:00.000Z'
+                    updatedAtUtc: '2026-11-24T18:30:00.000Z'
+                    initialProvisioning:
+                      operationId: 019abc12-3456-7000-8000-000000000102
+                      provisioningRequestId: 019abc12-3456-7000-8000-000000000102
+                      status: PENDING
+                      initialAdminFullName: Dra. Sofía Navarro
+                      initialAdminEmail: admin.norte@clinica-norte.vital-demo.test
+                      attemptCount: 0
+                      manualInterventionRequired: false
+                      lastErrorCode: null
+                      lastErrorSummary: null
+                      createdAtUtc: '2026-11-24T18:30:00.000Z'
+                      updatedAtUtc: '2026-11-24T18:30:00.000Z'
+                      lastAttemptAtUtc: null
+                      nextAttemptAtUtc: null
+                      completedAtUtc: null
+                      stages:
+                        infrastructureInstance: PENDING
+                        serviceDatabases: PENDING
+                        clinicalPreparation: PENDING
+                        identityPreparation: PENDING
+        '400':
+          $ref: '#/components/responses/ValidationBadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/TenantPublicIdConflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      tags:
+        - Tenants
+      summary: Listar clinicas registradas de forma resumida y paginada
+      description: |
+        Devuelve una proyeccion administrativa resumida con paginacion sencilla y orden determinista
+        (`createdAtUtc DESC, id DESC`). No incluye busqueda avanzada ni filtros complejos en v1.
+      operationId: listTenants
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: Numero de pagina basado en 1.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          description: Tamano de pagina acotado entre 1 y 50.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: Listado paginado de clinicas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantListResponse'
+              examples:
+                paginatedWithLegacyRow:
+                  summary: Pagina con registro actual y registro legado de PLAT-01
+                  value:
+                    items:
+                      - id: 019abc12-3456-7000-8000-000000000101
+                        publicId: clinica-norte
+                        name: Clínica Norte
+                        operationalState: PENDIENTE_ADMIN
+                        mayAuthenticate: false
+                        maxActiveAccounts: 15
+                        provisioningStatus: PENDING
+                        manualInterventionRequired: false
+                        createdAtUtc: '2026-11-24T18:30:00.000Z'
+                        updatedAtUtc: '2026-11-24T18:30:00.000Z'
+                      - id: 019a0000-0000-7000-8000-000000000001
+                        publicId: clinica-legado-p01
+                        name: Clínica Histórica Prueba
+                        operationalState: PENDIENTE_ADMIN
+                        mayAuthenticate: false
+                        maxActiveAccounts: null
+                        provisioningStatus: null
+                        manualInterventionRequired: false
+                        createdAtUtc: '2026-11-22T18:00:00.000Z'
+                        updatedAtUtc: '2026-11-22T18:00:00.000Z'
+                    page: 1
+                    pageSize: 20
+                    totalCount: 2
+                    totalPages: 1
+        '400':
+          $ref: '#/components/responses/InvalidPaginationBadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/tenants/{tenantId}:
+    get:
+      tags:
+        - Tenants
+      summary: Consultar detalle administrativo y progreso de aprovisionamiento de una clinica
+      description: |
+        Reutiliza la logica de consulta `GetTenantByIdHandler`. Permite visualizar identidad administrativa,
+        estado operativo, cuota, estado general de aprovisionamiento, progreso por etapas, fechas UTC y
+        necesidad de intervencion administrativa. Admite registros legados donde `maxActiveAccounts` o
+        `initialProvisioning` sean nulos y excluye campos internos del trabajador o infraestructura.
+      operationId: getTenantById
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: Identificador UUID de la clinica (no vacio).
+          schema:
+            type: string
+            format: uuid
+          example: 019abc12-3456-7000-8000-000000000101
+      responses:
+        '200':
+          description: Detalle administrativo de la clinica encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDetailsResponse'
+              examples:
+                failedTerminalManualIntervention:
+                  summary: Clinica con fallo terminal que requiere intervencion administrativa
+                  value:
+                    id: 019abc12-3456-7000-8000-000000000201
+                    publicId: clinica-sur
+                    name: Clínica Sur
+                    contactEmail: contacto@clinica-sur.vital-demo.test
+                    operationalState: PENDIENTE_ADMIN
+                    mayAuthenticate: false
+                    maxActiveAccounts: 10
+                    createdAtUtc: '2026-11-24T17:00:00.000Z'
+                    updatedAtUtc: '2026-11-24T17:15:10.000Z'
+                    initialProvisioning:
+                      operationId: 019abc12-3456-7000-8000-000000000202
+                      provisioningRequestId: 019abc12-3456-7000-8000-000000000202
+                      status: FAILED_TERMINAL
+                      initialAdminFullName: Dr. Héctor Méndez
+                      initialAdminEmail: admin.sur@clinica-sur.vital-demo.test
+                      attemptCount: 3
+                      manualInterventionRequired: true
+                      lastErrorCode: IDENTITY_PROVISIONING_CONFLICT
+                      lastErrorSummary: Identity reported a payload conflict for the provisioning request and requires administrative review.
+                      createdAtUtc: '2026-11-24T17:00:00.000Z'
+                      updatedAtUtc: '2026-11-24T17:15:10.000Z'
+                      lastAttemptAtUtc: '2026-11-24T17:15:10.000Z'
+                      nextAttemptAtUtc: null
+                      completedAtUtc: null
+                      stages:
+                        infrastructureInstance: CONFIRMED
+                        serviceDatabases: CONFIRMED
+                        clinicalPreparation: CONFIRMED
+                        identityPreparation: VERIFICATION_REQUIRED
+                legacyTenantWithoutProvisioning:
+                  summary: Registro legado de PLAT-01 sin cuota ni operacion inicial
+                  value:
+                    id: 019a0000-0000-7000-8000-000000000001
+                    publicId: clinica-legado-p01
+                    name: Clínica Histórica Prueba
+                    contactEmail: contacto@legado-p01.vital-demo.test
+                    operationalState: PENDIENTE_ADMIN
+                    mayAuthenticate: false
+                    maxActiveAccounts: null
+                    createdAtUtc: '2026-11-22T18:00:00.000Z'
+                    updatedAtUtc: '2026-11-22T18:00:00.000Z'
+                    initialProvisioning: null
+        '400':
+          $ref: '#/components/responses/InvalidTenantIdBadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/TenantNotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access Token JWT emitido exclusivamente por `saas-identity` (IDENTITY-SEC-01).
+        Requiere firma `RS256`, clave publica RSA >= 2048 bits, `iss="saas-identity"`,
+        `aud="vital-saas"`, `ClockSkew=30s`, `sub` UUID no vacio, `role="SUPER_ADMIN"`
+        y ausencia obligatoria del claim `tenant_id`.
+  headers:
+    Location:
+      description: Ruta relativa del recurso de clinica creado (`/v1/tenants/{tenantId}`).
+      required: true
+      schema:
+        type: string
+        example: /v1/tenants/019abc12-3456-7000-8000-000000000101
+  schemas:
+    TenantOperationalState:
+      type: string
+      description: Codigo estable de estado operativo de la clinica en Platform.
+      enum:
+        - PENDIENTE_ADMIN
+        - ACTIVA
+        - SUSPENDIDA
+    ProvisioningOperationStatus:
+      type: string
+      description: Estado tecnico durable de la operacion de aprovisionamiento inicial.
+      enum:
+        - PENDING
+        - IN_PROGRESS
+        - FAILED_RETRYABLE
+        - FAILED_TERMINAL
+        - COMPLETED
+    ProvisioningStageState:
+      type: string
+      description: Estado individual durable de una etapa de aprovisionamiento.
+      enum:
+        - PENDING
+        - VERIFICATION_REQUIRED
+        - CONFIRMED
+    CreateTenantRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - publicId
+        - name
+        - contactEmail
+        - initialAdminFullName
+        - initialAdminEmail
+        - maxActiveAccounts
+      properties:
+        publicId:
+          type: string
+          minLength: 3
+          maxLength: 64
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+          description: Identificador publico unico (slug). Normalizado con Trim + minusculas ASCII antes de validar unicidad.
+          example: clinica-norte
+        name:
+          type: string
+          minLength: 2
+          maxLength: 150
+          description: Nombre administrativo de la clinica (sin caracteres de control, normalizado con Trim).
+          example: Clínica Norte
+        contactEmail:
+          type: string
+          format: email
+          maxLength: 254
+          description: Correo administrativo de contacto de la clinica (dominio con punto).
+          example: contacto@clinica-norte.vital-demo.test
+        initialAdminFullName:
+          type: string
+          minLength: 2
+          maxLength: 150
+          description: Nombre completo del primer administrador clinico (`ADMIN_CLINICA`).
+          example: Dra. Sofía Navarro
+        initialAdminEmail:
+          type: string
+          format: email
+          maxLength: 254
+          description: Correo del primer administrador clinico (independiente de `contactEmail`).
+          example: admin.norte@clinica-norte.vital-demo.test
+        maxActiveAccounts:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Cuota maxima de cuentas activas asignada a la clinica (>= 1).
+          example: 15
+    ProvisioningStagesResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - infrastructureInstance
+        - serviceDatabases
+        - clinicalPreparation
+        - identityPreparation
+      properties:
+        infrastructureInstance:
+          $ref: '#/components/schemas/ProvisioningStageState'
+        serviceDatabases:
+          $ref: '#/components/schemas/ProvisioningStageState'
+        clinicalPreparation:
+          $ref: '#/components/schemas/ProvisioningStageState'
+        identityPreparation:
+          $ref: '#/components/schemas/ProvisioningStageState'
+    TenantProvisioningSummaryResponse:
+      type: object
+      nullable: true
+      additionalProperties: false
+      description: Resumen administrativo seguro del aprovisionamiento inicial (`null` solo en registros legados de PLAT-01).
+      required:
+        - operationId
+        - provisioningRequestId
+        - status
+        - initialAdminFullName
+        - initialAdminEmail
+        - attemptCount
+        - manualInterventionRequired
+        - lastErrorCode
+        - lastErrorSummary
+        - createdAtUtc
+        - updatedAtUtc
+        - lastAttemptAtUtc
+        - nextAttemptAtUtc
+        - completedAtUtc
+        - stages
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        provisioningRequestId:
+          type: string
+          maxLength: 64
+          description: Identificador interno estable usado por Platform para idempotencia del trabajador, distinto de una cabecera HTTP Idempotency-Key.
+        status:
+          $ref: '#/components/schemas/ProvisioningOperationStatus'
+        initialAdminFullName:
+          type: string
+          maxLength: 150
+        initialAdminEmail:
+          type: string
+          format: email
+          maxLength: 254
+        attemptCount:
+          type: integer
+          format: int32
+          minimum: 0
+        manualInterventionRequired:
+          type: boolean
+        lastErrorCode:
+          type: string
+          nullable: true
+          minLength: 2
+          maxLength: 64
+          pattern: '^[A-Z0-9_-]{2,64}$'
+        lastErrorSummary:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: Resumen tecnico controlado y sanitizado (nunca stack traces, credenciales ni mensajes SQL).
+        createdAtUtc:
+          type: string
+          format: date-time
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        updatedAtUtc:
+          type: string
+          format: date-time
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        lastAttemptAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        nextAttemptAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        completedAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        stages:
+          $ref: '#/components/schemas/ProvisioningStagesResponse'
+    TenantDetailsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - publicId
+        - name
+        - contactEmail
+        - operationalState
+        - mayAuthenticate
+        - maxActiveAccounts
+        - createdAtUtc
+        - updatedAtUtc
+        - initialProvisioning
+      properties:
+        id:
+          type: string
+          format: uuid
+        publicId:
+          type: string
+          minLength: 3
+          maxLength: 64
+        name:
+          type: string
+          minLength: 2
+          maxLength: 150
+        contactEmail:
+          type: string
+          format: email
+          maxLength: 254
+        operationalState:
+          $ref: '#/components/schemas/TenantOperationalState'
+        mayAuthenticate:
+          type: boolean
+        maxActiveAccounts:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+        createdAtUtc:
+          type: string
+          format: date-time
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        updatedAtUtc:
+          type: string
+          format: date-time
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        initialProvisioning:
+          $ref: '#/components/schemas/TenantProvisioningSummaryResponse'
+    TenantListItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - publicId
+        - name
+        - operationalState
+        - mayAuthenticate
+        - maxActiveAccounts
+        - provisioningStatus
+        - manualInterventionRequired
+        - createdAtUtc
+        - updatedAtUtc
+      properties:
+        id:
+          type: string
+          format: uuid
+        publicId:
+          type: string
+          minLength: 3
+          maxLength: 64
+        name:
+          type: string
+          minLength: 2
+          maxLength: 150
+        operationalState:
+          $ref: '#/components/schemas/TenantOperationalState'
+        mayAuthenticate:
+          type: boolean
+        maxActiveAccounts:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+        provisioningStatus:
+          type: string
+          nullable: true
+          description: Estado general de aprovisionamiento (`null` unicamente en registros legados de PLAT-01).
+          enum:
+            - PENDING
+            - IN_PROGRESS
+            - FAILED_RETRYABLE
+            - FAILED_TERMINAL
+            - COMPLETED
+            - null
+        manualInterventionRequired:
+          type: boolean
+        createdAtUtc:
+          type: string
+          format: date-time
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+        updatedAtUtc:
+          type: string
+          format: date-time
+          description: Marca temporal ISO-8601 en UTC (`Z`).
+    TenantListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - page
+        - pageSize
+        - totalCount
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantListItem'
+        page:
+          type: integer
+          format: int32
+          minimum: 1
+        pageSize:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 50
+        totalCount:
+          type: integer
+          format: int64
+          minimum: 0
+        totalPages:
+          type: integer
+          format: int32
+          minimum: 0
+    ValidationErrorItem:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - code
+        - message
+      properties:
+        field:
+          type: string
+          description: Nombre del campo afectado en camelCase.
+        code:
+          type: string
+          description: Codigo de regla de validacion (por ejemplo `required`, `length`, `format`, `range`).
+        message:
+          type: string
+          description: Descripcion legible sin datos sensibles.
+    ProblemDetails:
+      type: object
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - instance
+        - code
+        - traceId
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+        traceId:
+          type: string
+    ValidationProblemDetails:
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          required:
+            - errors
+          properties:
+            errors:
+              type: array
+              items:
+                $ref: '#/components/schemas/ValidationErrorItem'
+  responses:
+    ValidationBadRequest:
+      description: Error de validacion en el cuerpo de solicitud o JSON invalido.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ValidationProblemDetails'
+          examples:
+            validationError:
+              summary: Campos invalidos segun reglas de dominio de Tenant
+              value:
+                type: https://vital.internal/problems/validation-error
+                title: Validation failed
+                status: 400
+                detail: One or more validation errors occurred while processing the tenant registration.
+                instance: /v1/tenants
+                code: VALIDATION_ERROR
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-1a2b3c4d5e6f7a8b-00
+                errors:
+                  - field: publicId
+                    code: format
+                    message: PublicId must use lowercase ASCII letters, digits, and single internal hyphens (without dots or spaces).
+                  - field: maxActiveAccounts
+                    code: range
+                    message: MaxActiveAccounts must be at least 1.
+    InvalidPaginationBadRequest:
+      description: Parametros de paginacion invalidos (`page` o `pageSize` fuera de rango).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ValidationProblemDetails'
+          examples:
+            invalidPagination:
+              summary: pageSize fuera del limite maximo permitido
+              value:
+                type: https://vital.internal/problems/invalid-pagination
+                title: Invalid pagination parameters
+                status: 400
+                detail: Pagination parameters must satisfy page >= 1 and 1 <= pageSize <= 50.
+                instance: /v1/tenants
+                code: INVALID_PAGINATION
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-7777777777777777-00
+                errors:
+                  - field: pageSize
+                    code: range
+                    message: pageSize must be between 1 and 50.
+    InvalidTenantIdBadRequest:
+      description: El parametro de ruta `tenantId` no es un UUID valido no vacio.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          examples:
+            invalidTenantId:
+              summary: Identificador de ruta malformado
+              value:
+                type: https://vital.internal/problems/invalid-tenant-id
+                title: Invalid tenant identifier
+                status: 400
+                detail: The tenantId path parameter must be a non-empty valid UUID.
+                instance: /v1/tenants/not-a-uuid
+                code: INVALID_TENANT_ID
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-8888888888888888-00
+    Unauthorized:
+      description: Autenticacion ausente, token RS256 invalido/expirado, rol desconocido o claims contradictorios.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          examples:
+            unauthorized:
+              summary: Token rechazado por validacion RS256 o coherencia de claims
+              value:
+                type: https://vital.internal/problems/unauthorized
+                title: Unauthorized
+                status: 401
+                detail: A valid RS256 Bearer token issued by saas-identity with coherent identity claims is required.
+                instance: /v1/tenants
+                code: UNAUTHORIZED
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-2222222222222222-00
+    Forbidden:
+      description: Identidad valida pero sin autoridad administrativa global (`SUPER_ADMIN`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          examples:
+            forbidden:
+              summary: Token valido de cuenta clinica sin rol SUPER_ADMIN
+              value:
+                type: https://vital.internal/problems/forbidden
+                title: Forbidden
+                status: 403
+                detail: Only global SUPER_ADMIN accounts are authorized to access administrative tenant endpoints.
+                instance: /v1/tenants
+                code: FORBIDDEN
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-3333333333333333-00
+    TenantNotFound:
+      description: No existe una clinica registrada para el `tenantId` solicitado.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          examples:
+            tenantNotFound:
+              summary: Clinica inexistente
+              value:
+                type: https://vital.internal/problems/tenant-not-found
+                title: Tenant not found
+                status: 404
+                detail: No tenant was found for the specified identifier.
+                instance: /v1/tenants/019abc12-3456-7000-8000-000000009999
+                code: TENANT_NOT_FOUND
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-4444444444444444-00
+    TenantPublicIdConflict:
+      description: Ya existe una clinica registrada con el mismo `publicId`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          examples:
+            duplicateSlug:
+              summary: Conflicto de unicidad sobre publicId (`ux_tenants_public_id`)
+              value:
+                type: https://vital.internal/problems/tenant-public-id-conflict
+                title: Tenant public identifier conflict
+                status: 409
+                detail: "A tenant with public identifier 'clinica-norte' is already registered."
+                instance: /v1/tenants
+                code: TENANT_PUBLIC_ID_CONFLICT
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-5555555555555555-00
+    ServiceUnavailable:
+      description: Base de datos global o dependencia critica requerida no disponible (fallo cerrado).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          examples:
+            serviceUnavailable:
+              summary: Dependencia no disponible
+              value:
+                type: https://vital.internal/problems/service-unavailable
+                title: Service unavailable
+                status: 503
+                detail: A required dependency is temporarily unavailable to complete the administrative operation safely.
+                instance: /v1/tenants
+                code: SERVICE_UNAVAILABLE
+                traceId: 00-7e3f1a9b2c4d5e6f7a8b9c0d1e2f3a4b-6666666666666666-00
