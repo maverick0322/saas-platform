@@ -63,6 +63,29 @@ public sealed record AcquiredProvisioningOperation(
         };
 }
 
+public enum ResumeProvisioningOperationOutcome
+{
+    Resumed = 0,
+    NotFound = 1,
+    TenantNotPendingAdmin = 2,
+    InvalidStatusOrReason = 3,
+    AlreadyResumedOrNoPendingStage = 4,
+    ActiveLease = 5,
+    AttemptBudgetExhausted = 6,
+    NextStageAdapterNotConfigured = 7
+}
+
+public sealed record ResumeProvisioningOperationResult(
+    ResumeProvisioningOperationOutcome Outcome,
+    Guid OperationId,
+    Guid? TenantId = null,
+    ProvisioningStage? NextStage = null,
+    int? AttemptCount = null,
+    string? Summary = null)
+{
+    public bool Resumed => Outcome == ResumeProvisioningOperationOutcome.Resumed;
+}
+
 /// <summary>
 /// Almacén atómico de arrendamientos (lease + fencing) y progreso durable sobre PostgreSQL.
 /// Todas las transacciones y bloqueos de fila se liberan inmediatamente antes de invocar adaptadores externos.
@@ -490,4 +513,271 @@ public sealed class ProvisioningLeaseStore(PlatformDbContext dbContext)
         ProvisioningStage.IdentityPreparation => "initial_admin_account_id",
         _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "Unsupported provisioning stage.")
     };
+
+    public async Task<ResumeProvisioningOperationResult> TryResumeAdapterStoppedOperationAsync(
+        Guid operationId,
+        DateTimeOffset utcNow,
+        int maxTotalAttempts,
+        Func<ProvisioningStage, bool> isStageSupported,
+        CancellationToken cancellationToken)
+    {
+        if (operationId == Guid.Empty)
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.NotFound,
+                operationId,
+                Summary: "OperationId must be a non-empty UUID.");
+        }
+
+        ArgumentNullException.ThrowIfNull(isStageSupported);
+
+        var nowUtc = utcNow.ToUniversalTime();
+        var supportsInfrastructure = isStageSupported(ProvisioningStage.InfrastructureInstance);
+        var supportsServiceDatabases = isStageSupported(ProvisioningStage.ServiceDatabases);
+        var supportsClinical = isStageSupported(ProvisioningStage.ClinicalPreparation);
+        var supportsIdentity = isStageSupported(ProvisioningStage.IdentityPreparation);
+
+        const string resumeSql = """
+            UPDATE platform.tenant_provisioning_operations AS op
+            SET manual_intervention_required = FALSE,
+                next_attempt_at_utc = @utcNow,
+                last_error_code = NULL,
+                last_error_summary = NULL,
+                updated_at_utc = @utcNow,
+                concurrency_stamp = @concurrencyStamp
+            FROM platform.tenants AS t
+            WHERE op.id = @operationId
+              AND t.id = op.tenant_id
+              AND t.operational_state = 'PENDIENTE_ADMIN'
+              AND op.status = 'FAILED_RETRYABLE'
+              AND op.manual_intervention_required = TRUE
+              AND op.last_error_code = 'ADAPTER_NOT_CONFIGURED'
+              AND op.lease_owner IS NULL
+              AND (op.lease_until_utc IS NULL OR op.lease_until_utc <= @utcNow)
+              AND op.attempt_count < @maxTotalAttempts
+              AND CASE
+                    WHEN op.infrastructure_stage_state <> 'CONFIRMED' THEN @supportsInfrastructure
+                    WHEN op.service_databases_stage_state <> 'CONFIRMED' THEN @supportsServiceDatabases
+                    WHEN op.clinical_stage_state <> 'CONFIRMED' THEN @supportsClinical
+                    WHEN op.identity_stage_state <> 'CONFIRMED' THEN @supportsIdentity
+                    ELSE FALSE
+                  END
+            RETURNING op.tenant_id,
+                      op.attempt_count,
+                      op.infrastructure_stage_state,
+                      op.service_databases_stage_state,
+                      op.clinical_stage_state,
+                      op.identity_stage_state;
+            """;
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using (var command = new NpgsqlCommand(resumeSql, connection))
+        {
+            command.Parameters.AddWithValue("operationId", operationId);
+            command.Parameters.AddWithValue("utcNow", nowUtc);
+            command.Parameters.AddWithValue("concurrencyStamp", Guid.NewGuid());
+            command.Parameters.AddWithValue("maxTotalAttempts", maxTotalAttempts);
+            command.Parameters.AddWithValue("supportsInfrastructure", supportsInfrastructure);
+            command.Parameters.AddWithValue("supportsServiceDatabases", supportsServiceDatabases);
+            command.Parameters.AddWithValue("supportsClinical", supportsClinical);
+            command.Parameters.AddWithValue("supportsIdentity", supportsIdentity);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var tenantId = reader.GetGuid(0);
+                var attemptCount = reader.GetInt32(1);
+                var nextStage = ResolveNextStageFromCodes(
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4),
+                    reader.GetString(5));
+
+                return new ResumeProvisioningOperationResult(
+                    ResumeProvisioningOperationOutcome.Resumed,
+                    operationId,
+                    tenantId,
+                    nextStage,
+                    attemptCount,
+                    $"Operation re-queued for ordinary worker acquisition at stage '{nextStage?.ToCode()}'.");
+            }
+        }
+
+        const string inspectSql = """
+            SELECT op.tenant_id,
+                   t.operational_state,
+                   op.status,
+                   op.manual_intervention_required,
+                   op.last_error_code,
+                   op.lease_owner,
+                   op.lease_until_utc,
+                   op.attempt_count,
+                   op.infrastructure_stage_state,
+                   op.service_databases_stage_state,
+                   op.clinical_stage_state,
+                   op.identity_stage_state,
+                   op.next_attempt_at_utc
+            FROM platform.tenant_provisioning_operations AS op
+            INNER JOIN platform.tenants AS t ON t.id = op.tenant_id
+            WHERE op.id = @operationId;
+            """;
+
+        await using var inspectCommand = new NpgsqlCommand(inspectSql, connection);
+        inspectCommand.Parameters.AddWithValue("operationId", operationId);
+
+        await using var inspectReader = await inspectCommand.ExecuteReaderAsync(cancellationToken);
+        if (!await inspectReader.ReadAsync(cancellationToken))
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.NotFound,
+                operationId,
+                Summary: "Provisioning operation was not found.");
+        }
+
+        var existingTenantId = inspectReader.GetGuid(0);
+        var operationalState = inspectReader.GetString(1);
+        var status = inspectReader.GetString(2);
+        var manualIntervention = inspectReader.GetBoolean(3);
+        var lastErrorCode = inspectReader.IsDBNull(4) ? null : inspectReader.GetString(4);
+        var leaseOwner = inspectReader.IsDBNull(5) ? null : inspectReader.GetString(5);
+        var leaseUntil = inspectReader.IsDBNull(6) ? (DateTimeOffset?)null : inspectReader.GetFieldValue<DateTimeOffset>(6);
+        var attempts = inspectReader.GetInt32(7);
+        var existingNextStage = ResolveNextStageFromCodes(
+            inspectReader.GetString(8),
+            inspectReader.GetString(9),
+            inspectReader.GetString(10),
+            inspectReader.GetString(11));
+        var nextAttemptAt = inspectReader.IsDBNull(12) ? (DateTimeOffset?)null : inspectReader.GetFieldValue<DateTimeOffset>(12);
+
+        if (!string.Equals(operationalState, TenantOperationalStateExtensions.PendienteAdminCode, StringComparison.Ordinal))
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.TenantNotPendingAdmin,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                $"Tenant operational state '{operationalState}' is not eligible for resumption.");
+        }
+
+        if (leaseOwner is not null || (leaseUntil.HasValue && leaseUntil.Value > nowUtc)
+            || string.Equals(status, ProvisioningOperationStatusExtensions.InProgressCode, StringComparison.Ordinal))
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.ActiveLease,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                "Operation currently has an active lease or is in progress.");
+        }
+
+        if (existingNextStage is null)
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.AlreadyResumedOrNoPendingStage,
+                operationId,
+                existingTenantId,
+                null,
+                attempts,
+                "All provisioning stages are already confirmed.");
+        }
+
+        if (string.Equals(status, ProvisioningOperationStatusExtensions.FailedRetryableCode, StringComparison.Ordinal)
+            && !manualIntervention
+            && nextAttemptAt.HasValue)
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.AlreadyResumedOrNoPendingStage,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                "Operation is already scheduled for worker acquisition.");
+        }
+
+        if (!string.Equals(status, ProvisioningOperationStatusExtensions.FailedRetryableCode, StringComparison.Ordinal)
+            || !string.Equals(lastErrorCode, "ADAPTER_NOT_CONFIGURED", StringComparison.Ordinal))
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.InvalidStatusOrReason,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                $"Operation status '{status}' and reason '{lastErrorCode ?? "NONE"}' are not eligible for controlled adapter resumption.");
+        }
+
+        if (!manualIntervention)
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.AlreadyResumedOrNoPendingStage,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                "Operation is already scheduled for worker acquisition.");
+        }
+
+        if (attempts >= maxTotalAttempts)
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.AttemptBudgetExhausted,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                $"Attempt count ({attempts}) reached configured budget ({maxTotalAttempts}).");
+        }
+
+        if (!isStageSupported(existingNextStage.Value))
+        {
+            return new ResumeProvisioningOperationResult(
+                ResumeProvisioningOperationOutcome.NextStageAdapterNotConfigured,
+                operationId,
+                existingTenantId,
+                existingNextStage,
+                attempts,
+                $"Next pending stage '{existingNextStage.Value.ToCode()}' is not enabled in current worker configuration.");
+        }
+
+        return new ResumeProvisioningOperationResult(
+            ResumeProvisioningOperationOutcome.InvalidStatusOrReason,
+            operationId,
+            existingTenantId,
+            existingNextStage,
+            attempts,
+            "Operation state changed concurrently during inspection.");
+    }
+
+    private static ProvisioningStage? ResolveNextStageFromCodes(
+        string infrastructureState,
+        string serviceDatabasesState,
+        string clinicalState,
+        string identityState)
+    {
+        if (!string.Equals(infrastructureState, "CONFIRMED", StringComparison.Ordinal))
+        {
+            return ProvisioningStage.InfrastructureInstance;
+        }
+
+        if (!string.Equals(serviceDatabasesState, "CONFIRMED", StringComparison.Ordinal))
+        {
+            return ProvisioningStage.ServiceDatabases;
+        }
+
+        if (!string.Equals(clinicalState, "CONFIRMED", StringComparison.Ordinal))
+        {
+            return ProvisioningStage.ClinicalPreparation;
+        }
+
+        if (!string.Equals(identityState, "CONFIRMED", StringComparison.Ordinal))
+        {
+            return ProvisioningStage.IdentityPreparation;
+        }
+
+        return null;
+    }
 }

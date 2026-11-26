@@ -92,6 +92,14 @@ internal static class CloudNativePgClusterEvaluator
                 ErrorSummary: "Existing CloudNativePG cluster specification does not match the approved tenant profile.");
         }
 
+        if (options.ServiceDatabases.Enabled && !HasRequiredServicePgHbaRules(snapshot.PgHbaRules))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_PGHBA_NOT_CONFIGURED",
+                ErrorSummary: "Cluster specification does not enforce the required TLS-only pg_hba rules for service database owners.");
+        }
+
         if (!CloudNativePgClusterSpec.TryBuildTechnicalReference(
                 snapshot.Namespace,
                 snapshot.Name,
@@ -121,6 +129,100 @@ internal static class CloudNativePgClusterEvaluator
 
         return new CloudNativePgClusterEvaluation(CloudNativePgClusterEvaluationKind.Reconciling);
     }
+
+    public static CloudNativePgClusterEvaluation EvaluateForServiceDatabases(
+        CloudNativePgClusterSnapshot snapshot,
+        ProvisioningStageContext context,
+        CloudNativePgOptions options,
+        string expectedUid)
+    {
+        var baseEvaluation = Evaluate(snapshot, context, options);
+        if (baseEvaluation.Kind != CloudNativePgClusterEvaluationKind.Ready)
+        {
+            return baseEvaluation;
+        }
+
+        if (!string.Equals(snapshot.Uid?.Trim(), expectedUid.Trim(), StringComparison.Ordinal))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_CLUSTER_IDENTITY_MISMATCH",
+                ErrorSummary: "Observed Kubernetes cluster UID does not match the confirmed InfrastructureInstance reference.");
+        }
+
+        if (!HasRequiredServicePgHbaRules(snapshot.PgHbaRules))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_PGHBA_NOT_CONFIGURED",
+                ErrorSummary: "Cluster specification does not enforce the required TLS-only pg_hba rules for service database owners.");
+        }
+
+        var expectedWriteService = $"{snapshot.Name}-rw";
+        if (!string.IsNullOrWhiteSpace(snapshot.WriteService)
+            && !string.Equals(snapshot.WriteService.Trim(), expectedWriteService, StringComparison.Ordinal))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_CLUSTER_IDENTITY_MISMATCH",
+                ErrorSummary: "Observed Kubernetes cluster writeService does not match the deterministic tenant cluster.");
+        }
+
+        return baseEvaluation;
+    }
+
+    public static bool HasRequiredServicePgHbaRules(IReadOnlyList<string>? pgHbaRules)
+    {
+        if (pgHbaRules is null || pgHbaRules.Count < CloudNativePgClusterSpec.RequiredServicePgHbaRules.Count)
+        {
+            return false;
+        }
+
+        var allowIdentity = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[0]);
+        var allowClinical = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[1]);
+        var rejectOwners = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[2]);
+
+        var normalized = pgHbaRules.Select(NormalizeHbaLine).ToList();
+        var allowIdentityIndex = normalized.IndexOf(allowIdentity);
+        var allowClinicalIndex = normalized.IndexOf(allowClinical);
+        var rejectIndex = normalized.IndexOf(rejectOwners);
+
+        if (allowIdentityIndex < 0 || allowClinicalIndex < 0 || rejectIndex < 0)
+        {
+            return false;
+        }
+
+        if (allowIdentityIndex > rejectIndex || allowClinicalIndex > rejectIndex)
+        {
+            return false;
+        }
+
+        // Ninguna otra regla previa al reject puede conceder acceso amplio a identity_owner, clinical_owner o all.
+        for (var i = 0; i < rejectIndex; i++)
+        {
+            if (i == allowIdentityIndex || i == allowClinicalIndex)
+            {
+                continue;
+            }
+
+            var tokens = normalized[i].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length >= 4 && !tokens[^1].Equals("reject", StringComparison.OrdinalIgnoreCase))
+            {
+                var users = tokens[3];
+                if (users.Contains("identity_owner", StringComparison.Ordinal)
+                    || users.Contains("clinical_owner", StringComparison.Ordinal)
+                    || string.Equals(users, "all", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static string NormalizeHbaLine(string line)
+        => string.Join(' ', line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static bool IsSpecCompatible(CloudNativePgClusterSnapshot snapshot, CloudNativePgOptions options)
     {

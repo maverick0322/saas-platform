@@ -32,10 +32,18 @@ internal static class ProvisioningAdministrativeErrorCatalog
                 "Dedicated tenant database infrastructure is not ready yet.",
             "CNPG_API_TIMEOUT_UNCERTAIN" or "CNPG_CREATE_TIMEOUT_UNCERTAIN" or "CNPG_CLUSTER_DISAPPEARED" =>
                 "Dedicated database provisioning timed out and requires state verification before retrying.",
-            "CNPG_RBAC_FORBIDDEN" or "CNPG_INVALID_MANIFEST" or "CNPG_CLUSTER_OWNERSHIP_CONFLICT"
-                or "CNPG_CLUSTER_IDENTITY_MISMATCH" or "CNPG_CLUSTER_DELETING" or "CNPG_CLUSTER_SPEC_MISMATCH"
-                or "CNPG_CLUSTER_UNRECOVERABLE" or "CNPG_INVALID_CLUSTER_PAYLOAD" or "CNPG_API_REJECTED" =>
-                "Dedicated database provisioning stopped due to a Kubernetes or CloudNativePG validation error and requires administrative review.",
+            "CNPG_PGHBA_NOT_APPLIED" or "CNPG_ROLE_WAIT" or "CNPG_DATABASE_WAIT"
+                or "CNPG_DISTRIBUTION_CONCURRENCY_EXHAUSTED" or "PG_INFRASTRUCTURE_UNREACHABLE" =>
+                "Service database preparation is waiting for PostgreSQL isolation or reconciliation rules to take effect.",
+            "CNPG_RBAC_FORBIDDEN" or "CNPG_INVALID_MANIFEST" or "CNPG_CLUSTER_MISSING"
+                or "CNPG_CLUSTER_OWNERSHIP_CONFLICT" or "CNPG_CLUSTER_IDENTITY_MISMATCH"
+                or "CNPG_CLUSTER_DELETING" or "CNPG_CLUSTER_SPEC_MISMATCH"
+                or "CNPG_CLUSTER_UNRECOVERABLE" or "CNPG_INVALID_CLUSTER_PAYLOAD" or "CNPG_API_REJECTED"
+                or "CNPG_PGHBA_NOT_CONFIGURED" or "CNPG_ROLE_CONFLICT" or "CNPG_DATABASE_CONFLICT"
+                or "CNPG_AUTH_SECRET_CONFLICT" or "CNPG_DISTRIBUTION_SECRET_MISSING"
+                or "CNPG_DISTRIBUTION_SECRET_CONFLICT"
+                or "PG_ACL_VERIFICATION_FAILED" or "PG_ISOLATION_VERIFICATION_FAILED" =>
+                "Dedicated database provisioning stopped due to a Kubernetes or PostgreSQL validation error and requires administrative review.",
             "INVALID_TECHNICAL_REFERENCE" =>
                 "Infrastructure provisioning returned an invalid cluster reference and requires administrative verification.",
             "ADAPTER_NOT_CONFIGURED" =>

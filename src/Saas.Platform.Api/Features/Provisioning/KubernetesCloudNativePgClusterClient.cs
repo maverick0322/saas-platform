@@ -1,8 +1,6 @@
 using System.Net;
 using System.Text.Json;
-using k8s;
 using k8s.Autorest;
-using k8s.Exceptions;
 
 namespace Saas.Platform.Api.Features.Provisioning;
 
@@ -11,16 +9,14 @@ namespace Saas.Platform.Api.Features.Provisioning;
 /// dentro de un único namespace usando credenciales InCluster (ServiceAccount).
 /// </summary>
 internal sealed class KubernetesCloudNativePgClusterClient(
+    IKubernetesClientAccessor clientAccessor,
     CloudNativePgOptions options,
     ILogger<KubernetesCloudNativePgClusterClient> logger)
-    : ICloudNativePgClusterClient, IDisposable
+    : ICloudNativePgClusterClient
 {
-    private readonly Lock _sync = new();
-    private IKubernetes? _client;
-
     public void EnsureInitialized()
     {
-        _ = GetOrCreateClient();
+        _ = clientAccessor.GetOrCreateClient();
     }
 
     public async Task<CloudNativePgGetResult> GetClusterAsync(
@@ -28,7 +24,7 @@ internal sealed class KubernetesCloudNativePgClusterClient(
         string clusterName,
         CancellationToken cancellationToken)
     {
-        var client = GetOrCreateClient();
+        var client = clientAccessor.GetOrCreateClient();
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(options.ApiCallTimeout);
 
@@ -97,7 +93,7 @@ internal sealed class KubernetesCloudNativePgClusterClient(
         IReadOnlyDictionary<string, object?> manifest,
         CancellationToken cancellationToken)
     {
-        var client = GetOrCreateClient();
+        var client = clientAccessor.GetOrCreateClient();
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(options.ApiCallTimeout);
 
@@ -155,39 +151,6 @@ internal sealed class KubernetesCloudNativePgClusterClient(
             return CloudNativePgCreateResult.Uncertain(
                 "CNPG_CREATE_TIMEOUT_UNCERTAIN",
                 "Transport error occurred after submitting CloudNativePG cluster creation; verification required.");
-        }
-    }
-
-    public void Dispose()
-    {
-        lock (_sync)
-        {
-            _client?.Dispose();
-            _client = null;
-        }
-    }
-
-    private IKubernetes GetOrCreateClient()
-    {
-        lock (_sync)
-        {
-            if (_client is not null)
-            {
-                return _client;
-            }
-
-            try
-            {
-                var config = KubernetesClientConfiguration.InClusterConfig();
-                _client = new Kubernetes(config);
-                return _client;
-            }
-            catch (KubeConfigException ex)
-            {
-                throw new InvalidOperationException(
-                    "Kubernetes in-cluster ServiceAccount configuration is unavailable for CloudNativePG provisioning.",
-                    ex);
-            }
         }
     }
 

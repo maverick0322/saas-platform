@@ -27,7 +27,9 @@ internal sealed record CloudNativePgClusterSnapshot(
     string? Phase,
     string? ReadyConditionStatus,
     string? ReadyConditionReason,
-    long? ReadyConditionObservedGeneration)
+    long? ReadyConditionObservedGeneration,
+    IReadOnlyList<string>? PgHbaRules = null,
+    string? WriteService = null)
 {
     public static bool TryParse(JsonElement root, out CloudNativePgClusterSnapshot? snapshot)
     {
@@ -62,11 +64,31 @@ internal sealed record CloudNativePgClusterSnapshot(
         string? cpuLimit = null;
         string? memoryRequest = null;
         string? memoryLimit = null;
+        IReadOnlyList<string>? pgHbaRules = null;
 
         if (root.TryGetProperty("spec", out var spec) && spec.ValueKind == JsonValueKind.Object)
         {
             instances = GetInt32OrNull(spec, "instances");
             imageName = GetStringOrNull(spec, "imageName");
+
+            if (spec.TryGetProperty("postgresql", out var postgresql) && postgresql.ValueKind == JsonValueKind.Object
+                && postgresql.TryGetProperty("pg_hba", out var hbaElement) && hbaElement.ValueKind == JsonValueKind.Array)
+            {
+                var parsedRules = new List<string>();
+                foreach (var rule in hbaElement.EnumerateArray())
+                {
+                    if (rule.ValueKind == JsonValueKind.String)
+                    {
+                        var text = rule.GetString();
+                        if (text is not null)
+                        {
+                            parsedRules.Add(text);
+                        }
+                    }
+                }
+
+                pgHbaRules = parsedRules;
+            }
 
             if (spec.TryGetProperty("storage", out var storage) && storage.ValueKind == JsonValueKind.Object)
             {
@@ -98,6 +120,7 @@ internal sealed record CloudNativePgClusterSnapshot(
         string? readyConditionStatus = null;
         string? readyConditionReason = null;
         long? readyConditionObservedGeneration = null;
+        string? writeService = null;
 
         if (root.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.Object)
         {
@@ -106,6 +129,7 @@ internal sealed record CloudNativePgClusterSnapshot(
             currentPrimary = GetStringOrNull(status, "currentPrimary");
             targetPrimary = GetStringOrNull(status, "targetPrimary");
             phase = GetStringOrNull(status, "phase");
+            writeService = GetStringOrNull(status, "writeService");
 
             if (status.TryGetProperty("conditions", out var conditions) && conditions.ValueKind == JsonValueKind.Array)
             {
@@ -151,7 +175,9 @@ internal sealed record CloudNativePgClusterSnapshot(
             phase,
             readyConditionStatus,
             readyConditionReason,
-            readyConditionObservedGeneration);
+            readyConditionObservedGeneration,
+            pgHbaRules,
+            writeService);
 
         return true;
     }
