@@ -48,11 +48,23 @@ public sealed class CloudNativePgOptions
 
     public int ReadinessPollIntervalSeconds { get; set; } = 3;
 
+    public CloudNativePgServiceDatabasesOptions ServiceDatabases { get; set; } = new();
+
     public TimeSpan ApiCallTimeout => TimeSpan.FromSeconds(ApiCallTimeoutSeconds);
 
     public TimeSpan ReadinessTimeout => TimeSpan.FromSeconds(ReadinessTimeoutSeconds);
 
     public TimeSpan ReadinessPollInterval => TimeSpan.FromSeconds(ReadinessPollIntervalSeconds);
+
+    public static bool IsValidDns1123Label(string? value, int maxLength = 63)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= maxLength
+            && Dns1123LabelPattern.IsMatch(value);
+
+    public static bool IsValidDns1123Subdomain(string? value, int maxLength = 253)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= maxLength
+            && Dns1123SubdomainPattern.IsMatch(value);
 
     public void Validate()
     {
@@ -142,6 +154,115 @@ public sealed class CloudNativePgOptions
         {
             throw new InvalidOperationException(
                 "CloudNativePg:ReadinessPollIntervalSeconds must be between 1 and CloudNativePg:ReadinessTimeoutSeconds.");
+        }
+
+        ServiceDatabases ??= new CloudNativePgServiceDatabasesOptions();
+        ServiceDatabases.Validate(Namespace);
+    }
+}
+
+public sealed class ServiceDistributionSecretOptions
+{
+    public string Namespace { get; set; } = string.Empty;
+
+    public string Name { get; set; } = string.Empty;
+}
+
+public sealed class CloudNativePgServiceDatabasesOptions
+{
+    public bool Enabled { get; set; }
+
+    public string ServiceDnsSuffix { get; set; } = "svc";
+
+    public int PostgreSqlPort { get; set; } = 5432;
+
+    public int SqlConnectTimeoutSeconds { get; set; } = 5;
+
+    public int SqlCommandTimeoutSeconds { get; set; } = 10;
+
+    public int SecretDistributionMaxConcurrencyRetries { get; set; } = 5;
+
+    public ServiceDistributionSecretOptions IdentityDistributionSecret { get; set; } = new();
+
+    public ServiceDistributionSecretOptions ClinicalDistributionSecret { get; set; } = new();
+
+    public TimeSpan SqlConnectTimeout => TimeSpan.FromSeconds(SqlConnectTimeoutSeconds);
+
+    public TimeSpan SqlCommandTimeout => TimeSpan.FromSeconds(SqlCommandTimeoutSeconds);
+
+    public void Validate(string clusterNamespace)
+    {
+        if (!CloudNativePgOptions.IsValidDns1123Subdomain(ServiceDnsSuffix))
+        {
+            throw new InvalidOperationException(
+                "CloudNativePg:ServiceDatabases:ServiceDnsSuffix must be a valid DNS-1123 subdomain.");
+        }
+
+        if (PostgreSqlPort is < 1 or > 65535)
+        {
+            throw new InvalidOperationException(
+                "CloudNativePg:ServiceDatabases:PostgreSqlPort must be between 1 and 65535.");
+        }
+
+        if (SqlConnectTimeoutSeconds is < 1 or > 30)
+        {
+            throw new InvalidOperationException(
+                "CloudNativePg:ServiceDatabases:SqlConnectTimeoutSeconds must be between 1 and 30.");
+        }
+
+        if (SqlCommandTimeoutSeconds is < 1 or > 60)
+        {
+            throw new InvalidOperationException(
+                "CloudNativePg:ServiceDatabases:SqlCommandTimeoutSeconds must be between 1 and 60.");
+        }
+
+        if (SecretDistributionMaxConcurrencyRetries is < 1 or > 10)
+        {
+            throw new InvalidOperationException(
+                "CloudNativePg:ServiceDatabases:SecretDistributionMaxConcurrencyRetries must be between 1 and 10.");
+        }
+
+        if (!Enabled)
+        {
+            return;
+        }
+
+        IdentityDistributionSecret ??= new ServiceDistributionSecretOptions();
+        ClinicalDistributionSecret ??= new ServiceDistributionSecretOptions();
+
+        ValidateDistributionSecret(IdentityDistributionSecret, "IdentityDistributionSecret", clusterNamespace);
+        ValidateDistributionSecret(ClinicalDistributionSecret, "ClinicalDistributionSecret", clusterNamespace);
+
+        if (string.Equals(IdentityDistributionSecret.Namespace, ClinicalDistributionSecret.Namespace, StringComparison.Ordinal)
+            && string.Equals(IdentityDistributionSecret.Name, ClinicalDistributionSecret.Name, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "CloudNativePg:ServiceDatabases:IdentityDistributionSecret and ClinicalDistributionSecret must be distinct Kubernetes Secrets.");
+        }
+    }
+
+    private static void ValidateDistributionSecret(
+        ServiceDistributionSecretOptions secret,
+        string optionName,
+        string clusterNamespace)
+    {
+        if (!CloudNativePgOptions.IsValidDns1123Label(secret.Namespace))
+        {
+            throw new InvalidOperationException(
+                $"CloudNativePg:ServiceDatabases:{optionName}:Namespace must be a valid Kubernetes namespace name.");
+        }
+
+        if (!CloudNativePgOptions.IsValidDns1123Subdomain(secret.Name))
+        {
+            throw new InvalidOperationException(
+                $"CloudNativePg:ServiceDatabases:{optionName}:Name must be a valid Kubernetes Secret name.");
+        }
+
+        if (string.Equals(secret.Namespace, clusterNamespace, StringComparison.Ordinal)
+            && secret.Name.StartsWith("pg-auth-", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"CloudNativePg:ServiceDatabases:{optionName} must be separated from CNPG DatabaseRole auth Secrets (pg-auth-*).");
         }
     }
 }

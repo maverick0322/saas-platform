@@ -41,6 +41,8 @@ public interface IProvisioningStageExecutor
 {
     bool SupportsRealProvisioning { get; }
 
+    bool SupportsStage(ProvisioningStage stage) => false;
+
     void ValidateStartupConfiguration()
     {
     }

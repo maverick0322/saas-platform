@@ -19,7 +19,8 @@ namespace Saas.Platform.Api;
 public enum PlatformRuntimeMode
 {
     Api = 0,
-    Worker = 1
+    Worker = 1,
+    ResumeOperation = 2
 }
 
 /// <summary>
@@ -32,6 +33,11 @@ public static class PlatformHostFactory
     {
         foreach (var arg in args)
         {
+            if (string.Equals(arg, "--mode=resume-operation", StringComparison.OrdinalIgnoreCase))
+            {
+                return PlatformRuntimeMode.ResumeOperation;
+            }
+
             if (string.Equals(arg, "--mode=worker", StringComparison.OrdinalIgnoreCase))
             {
                 return PlatformRuntimeMode.Worker;
@@ -52,6 +58,22 @@ public static class PlatformHostFactory
         }
 
         return PlatformRuntimeMode.Api;
+    }
+
+    public static bool TryResolveOperationIdArg(string[] args, out Guid operationId)
+    {
+        operationId = Guid.Empty;
+        foreach (var arg in args)
+        {
+            const string prefix = "--operation-id=";
+            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var rawId = arg[prefix.Length..].Trim();
+                return Guid.TryParse(rawId, out operationId) && operationId != Guid.Empty;
+            }
+        }
+
+        return false;
     }
 
     public static WebApplication CreateApiApplication(
@@ -159,6 +181,17 @@ public static class PlatformHostFactory
     public static IHost CreateWorkerHost(
         string[] args,
         Action<IServiceCollection>? configureServices = null)
+        => BuildProvisioningHost(args, includeHostedWorkerService: true, configureServices);
+
+    public static IHost CreateResumeOperationHost(
+        string[] args,
+        Action<IServiceCollection>? configureServices = null)
+        => BuildProvisioningHost(args, includeHostedWorkerService: false, configureServices);
+
+    private static IHost BuildProvisioningHost(
+        string[] args,
+        bool includeHostedWorkerService,
+        Action<IServiceCollection>? configureServices)
     {
         var builder = Host.CreateApplicationBuilder(args);
 
@@ -198,7 +231,11 @@ public static class PlatformHostFactory
                 cnpgOptions.Validate();
 
                 builder.Services.AddSingleton(cnpgOptions);
+                builder.Services.AddSingleton<IKubernetesClientAccessor, KubernetesInClusterClientAccessor>();
                 builder.Services.AddSingleton<ICloudNativePgClusterClient, KubernetesCloudNativePgClusterClient>();
+                builder.Services.AddSingleton<ICloudNativePgServiceDatabaseResourcesClient, KubernetesCloudNativePgServiceDatabaseResourcesClient>();
+                builder.Services.AddSingleton<IServiceDatabaseSqlVerifier, NpgsqlServiceDatabaseSqlVerifier>();
+                builder.Services.AddSingleton<CloudNativePgServiceDatabasesStageHandler>();
                 builder.Services.AddSingleton<IProvisioningStageExecutor, CloudNativePgProvisioningStageExecutor>();
                 break;
             }
@@ -209,7 +246,12 @@ public static class PlatformHostFactory
 
         builder.Services.AddScoped<ProvisioningLeaseStore>();
         builder.Services.AddScoped<ProvisioningOperationProcessor>();
-        builder.Services.AddHostedService<ProvisioningWorkerHostedService>();
+        builder.Services.AddScoped<ResumeProvisioningOperationHandler>();
+
+        if (includeHostedWorkerService)
+        {
+            builder.Services.AddHostedService<ProvisioningWorkerHostedService>();
+        }
 
         configureServices?.Invoke(builder.Services);
 

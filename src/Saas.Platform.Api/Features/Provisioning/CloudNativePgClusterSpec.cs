@@ -21,6 +21,13 @@ internal static class CloudNativePgClusterSpec
     public const string TenantIdLabelKey = "vital.saas/tenant-id";
     public const string OperationIdLabelKey = "vital.saas/provisioning-operation-id";
 
+    public static readonly IReadOnlyList<string> RequiredServicePgHbaRules =
+    [
+        "hostssl identity identity_owner all scram-sha-256",
+        "hostssl clinical clinical_owner all scram-sha-256",
+        "host all identity_owner,clinical_owner all reject"
+    ];
+
     public static string BuildClusterName(Guid tenantId)
     {
         if (tenantId == Guid.Empty)
@@ -70,6 +77,49 @@ internal static class CloudNativePgClusterSpec
         return true;
     }
 
+    public static bool TryParseTechnicalReference(
+        string? technicalReference,
+        out string @namespace,
+        out string clusterName,
+        out string uid)
+    {
+        @namespace = string.Empty;
+        clusterName = string.Empty;
+        uid = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(technicalReference))
+        {
+            return false;
+        }
+
+        var slashIndex = technicalReference.IndexOf('/', StringComparison.Ordinal);
+        if (slashIndex <= 0)
+        {
+            return false;
+        }
+
+        var atIndex = technicalReference.IndexOf('@', slashIndex + 1);
+        if (atIndex <= slashIndex + 1 || atIndex >= technicalReference.Length - 1)
+        {
+            return false;
+        }
+
+        var parsedNs = technicalReference[..slashIndex];
+        var parsedName = technicalReference[(slashIndex + 1)..atIndex];
+        var parsedUid = technicalReference[(atIndex + 1)..];
+
+        if (!TryBuildTechnicalReference(parsedNs, parsedName, parsedUid, out var rebuilt)
+            || !string.Equals(rebuilt, technicalReference, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        @namespace = parsedNs;
+        clusterName = parsedName;
+        uid = parsedUid;
+        return true;
+    }
+
     public static IReadOnlyDictionary<string, object?> BuildClusterManifest(
         ProvisioningStageContext context,
         CloudNativePgOptions options)
@@ -78,6 +128,37 @@ internal static class CloudNativePgClusterSpec
         ArgumentNullException.ThrowIfNull(options);
 
         var clusterName = BuildClusterName(context.TenantId);
+        var spec = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["instances"] = options.Instances,
+            ["imageName"] = options.ImageName,
+            ["storage"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["storageClass"] = options.StorageClass,
+                ["size"] = options.StorageSize
+            },
+            ["resources"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["requests"] = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["cpu"] = options.CpuRequest,
+                    ["memory"] = options.MemoryRequest
+                },
+                ["limits"] = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["cpu"] = options.CpuLimit,
+                    ["memory"] = options.MemoryLimit
+                }
+            }
+        };
+
+        if (options.ServiceDatabases.Enabled)
+        {
+            spec["postgresql"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["pg_hba"] = RequiredServicePgHbaRules
+            };
+        }
 
         return new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -95,29 +176,7 @@ internal static class CloudNativePgClusterSpec
                     [OperationIdLabelKey] = context.OperationId.ToString("D")
                 }
             },
-            ["spec"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["instances"] = options.Instances,
-                ["imageName"] = options.ImageName,
-                ["storage"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-                {
-                    ["storageClass"] = options.StorageClass,
-                    ["size"] = options.StorageSize
-                },
-                ["resources"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-                {
-                    ["requests"] = new Dictionary<string, string>(StringComparer.Ordinal)
-                    {
-                        ["cpu"] = options.CpuRequest,
-                        ["memory"] = options.MemoryRequest
-                    },
-                    ["limits"] = new Dictionary<string, string>(StringComparer.Ordinal)
-                    {
-                        ["cpu"] = options.CpuLimit,
-                        ["memory"] = options.MemoryLimit
-                    }
-                }
-            }
+            ["spec"] = spec
         };
     }
 }

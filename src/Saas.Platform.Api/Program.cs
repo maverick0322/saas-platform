@@ -1,6 +1,25 @@
 using Saas.Platform.Api;
+using Saas.Platform.Api.Features.Provisioning;
 
-if (PlatformHostFactory.ResolveRuntimeMode(args) == PlatformRuntimeMode.Worker)
+var runtimeMode = PlatformHostFactory.ResolveRuntimeMode(args);
+if (runtimeMode == PlatformRuntimeMode.ResumeOperation)
+{
+    if (!PlatformHostFactory.TryResolveOperationIdArg(args, out var operationId))
+    {
+        Console.Error.WriteLine("Missing or invalid --operation-id=<uuid> for --mode=resume-operation.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    using var resumeHost = PlatformHostFactory.CreateResumeOperationHost(args);
+    await using var scope = resumeHost.Services.CreateAsyncScope();
+    var handler = scope.ServiceProvider.GetRequiredService<ResumeProvisioningOperationHandler>();
+    var result = await handler.HandleAsync(operationId, CancellationToken.None);
+    Environment.ExitCode = result.Resumed ? 0 : 1;
+    return;
+}
+
+if (runtimeMode == PlatformRuntimeMode.Worker)
 {
     using var workerHost = PlatformHostFactory.CreateWorkerHost(args);
     await workerHost.RunAsync();

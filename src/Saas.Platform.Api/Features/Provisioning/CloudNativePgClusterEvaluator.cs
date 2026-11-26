@@ -92,6 +92,14 @@ internal static class CloudNativePgClusterEvaluator
                 ErrorSummary: "Existing CloudNativePG cluster specification does not match the approved tenant profile.");
         }
 
+        if (options.ServiceDatabases.Enabled && !HasRequiredServicePgHbaRules(snapshot.PgHbaRules))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_PGHBA_NOT_CONFIGURED",
+                ErrorSummary: "Cluster specification does not enforce the required TLS-only pg_hba rules for service database owners.");
+        }
+
         if (!CloudNativePgClusterSpec.TryBuildTechnicalReference(
                 snapshot.Namespace,
                 snapshot.Name,
@@ -121,6 +129,70 @@ internal static class CloudNativePgClusterEvaluator
 
         return new CloudNativePgClusterEvaluation(CloudNativePgClusterEvaluationKind.Reconciling);
     }
+
+    public static CloudNativePgClusterEvaluation EvaluateForServiceDatabases(
+        CloudNativePgClusterSnapshot snapshot,
+        ProvisioningStageContext context,
+        CloudNativePgOptions options,
+        string expectedUid)
+    {
+        var baseEvaluation = Evaluate(snapshot, context, options);
+        if (baseEvaluation.Kind != CloudNativePgClusterEvaluationKind.Ready)
+        {
+            return baseEvaluation;
+        }
+
+        if (!string.Equals(snapshot.Uid?.Trim(), expectedUid.Trim(), StringComparison.Ordinal))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_CLUSTER_IDENTITY_MISMATCH",
+                ErrorSummary: "Observed Kubernetes cluster UID does not match the confirmed InfrastructureInstance reference.");
+        }
+
+        if (!HasRequiredServicePgHbaRules(snapshot.PgHbaRules))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_PGHBA_NOT_CONFIGURED",
+                ErrorSummary: "Cluster specification does not enforce the required TLS-only pg_hba rules for service database owners.");
+        }
+
+        var expectedWriteService = $"{snapshot.Name}-rw";
+        if (!string.IsNullOrWhiteSpace(snapshot.WriteService)
+            && !string.Equals(snapshot.WriteService.Trim(), expectedWriteService, StringComparison.Ordinal))
+        {
+            return new CloudNativePgClusterEvaluation(
+                CloudNativePgClusterEvaluationKind.TerminalConflict,
+                ErrorCode: "CNPG_CLUSTER_IDENTITY_MISMATCH",
+                ErrorSummary: "Observed Kubernetes cluster writeService does not match the deterministic tenant cluster.");
+        }
+
+        return baseEvaluation;
+    }
+
+    public static bool HasRequiredServicePgHbaRules(IReadOnlyList<string>? pgHbaRules)
+    {
+        if (pgHbaRules is null || pgHbaRules.Count != CloudNativePgClusterSpec.RequiredServicePgHbaRules.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < CloudNativePgClusterSpec.RequiredServicePgHbaRules.Count; i++)
+        {
+            var expected = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[i]);
+            var actual = NormalizeHbaLine(pgHbaRules[i]);
+            if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string NormalizeHbaLine(string line)
+        => string.Join(' ', line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static bool IsSpecCompatible(CloudNativePgClusterSnapshot snapshot, CloudNativePgOptions options)
     {

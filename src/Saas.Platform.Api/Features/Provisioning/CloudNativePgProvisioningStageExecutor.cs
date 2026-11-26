@@ -3,17 +3,26 @@ using Saas.Platform.Api.Domain;
 namespace Saas.Platform.Api.Features.Provisioning;
 
 /// <summary>
-/// Adaptador real de infraestructura CloudNativePG para la etapa <c>InfrastructureInstance</c> (PLAT-05A).
-/// Crea o reconcilia un recurso <c>postgresql.cnpg.io/v1 Cluster</c> por tenant sin configurar roles SQL,
-/// bases de servicio ni activación efectiva (etapas posteriores permanecen en <c>AdapterNotConfigured</c>).
+/// Adaptador real de aprovisionamiento sobre CloudNativePG (PLAT-05A / PLAT-05B).
+/// Atiende <c>InfrastructureInstance</c> y, cuando está habilitado en configuración, <c>ServiceDatabases</c>;
+/// etapas posteriores (<c>ClinicalPreparation</c> e <c>IdentityPreparation</c>) devuelven <c>AdapterNotConfigured</c>.
 /// </summary>
 internal sealed class CloudNativePgProvisioningStageExecutor(
     ICloudNativePgClusterClient clusterClient,
     CloudNativePgOptions options,
     TimeProvider timeProvider,
-    ILogger<CloudNativePgProvisioningStageExecutor> logger) : IProvisioningStageExecutor
+    ILogger<CloudNativePgProvisioningStageExecutor> logger,
+    CloudNativePgServiceDatabasesStageHandler? serviceDatabasesHandler = null) : IProvisioningStageExecutor
 {
     public bool SupportsRealProvisioning => true;
+
+    public bool SupportsStage(ProvisioningStage stage)
+        => stage switch
+        {
+            ProvisioningStage.InfrastructureInstance => true,
+            ProvisioningStage.ServiceDatabases => options.ServiceDatabases.Enabled && serviceDatabasesHandler is not null,
+            _ => false
+        };
 
     public void ValidateStartupConfiguration()
     {
@@ -27,6 +36,13 @@ internal sealed class CloudNativePgProvisioningStageExecutor(
     {
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
+
+        if (context.Stage == ProvisioningStage.ServiceDatabases
+            && options.ServiceDatabases.Enabled
+            && serviceDatabasesHandler is not null)
+        {
+            return await serviceDatabasesHandler.ExecuteAsync(context, cancellationToken);
+        }
 
         if (context.Stage != ProvisioningStage.InfrastructureInstance)
         {
