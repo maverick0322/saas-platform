@@ -108,3 +108,30 @@ Deshabilitado por defecto en [`appsettings.json`](../src/Saas.Platform.Api/appse
    ```
    y verificar el rollout ordenado/estado `Cluster in healthy state`.
 4. **Limitaciones pendientes:** falta validación real en K3s con CloudNativePG `1.30.2`, prueba real de consumo por `Identity` y `Clinical` (`PLAT-05C`), verificación de CA del servidor PostgreSQL en DSNs de consumidores y rotación automática de credenciales.
+
+---
+
+## 8. Incidente de serialización CNPG (`PLAT-05B-FIX-2`) y recuperación excepcional
+
+### 8.1 Causa raíz y auditoría de esquema CloudNativePG `v1.30.2`
+
+Durante la integración real de `PLAT-05B`, CloudNativePG `1.30.2` reconcilió correctamente el `DatabaseRole` inicial de Identity (`role-01a214affddc713ea908c1f690486d90-identity`), pero Kubernetes devolvió el objeto omitiendo las 6 propiedades booleanas de `RoleConfiguration` con valor `false` debido a las etiquetas Go `json:"...,omitempty"` en `api/v1/cluster_types.go`:
+
+- `login`, `superuser`, `createdb`, `createrole`, `replication`, `bypassrls`.
+
+El parser anterior (`KubernetesJsonParser.GetBoolOrNull`) interpretaba propiedades ausentes como `null`, causando que `CloudNativePgDatabaseRoleSnapshot.Evaluate` (`!= false`) rechazara falsamente el recurso con `CNPG_ROLE_CONFLICT` (`FAILED_TERMINAL`).
+
+**Auditoría acotada sobre `DatabaseRole` y `Database` (`cloudnative-pg/cloudnative-pg@v1.30.2`):**
+
+- Los **únicos** campos normalizados a `false` cuando faltan en el JSON son esos 6 booleanos en [`ServiceDatabaseTarget.cs`](../src/Saas.Platform.Api/Features/Provisioning/ServiceDatabaseTarget.cs) (`CloudNativePgDatabaseRoleSnapshot.TryParse`). Si el valor JSON presente es `null` explícito o un tipo no booleano, `TryParse` falla de forma cerrada (`false`).
+- `ensure` (`+kubebuilder:default:="present"`) y `databaseRoleReclaimPolicy` / `databaseReclaimPolicy` (`+kubebuilder:default:=retain`) poseen valores por defecto en el esquema OpenAPI del CRD aplicados en admisión por Kubernetes, por lo que no requieren normalización especulativa.
+- `status.applied` (`*bool`) y `status.observedGeneration` (`int64`) conservan su semántica original sin normalizar ausencia a `false`.
+
+### 8.2 Reutilización del `DatabaseRole` existente de Identity y recuperación excepcional temporal
+
+- Al corregir el borde de deserialización, el flujo ordinario de [`CloudNativePgServiceDatabasesStageHandler.cs`](../src/Saas.Platform.Api/Features/Provisioning/CloudNativePgServiceDatabasesStageHandler.cs) detecta y reutiliza mediante `GET` el `DatabaseRole` existente de Identity (`UID: eee4ce4c-f650-471a-8e59-01cc13ac0be9`) sin recrearlo ni eliminarlo, y continúa con `Clinical` y los pasos restantes hasta completar `ServiceDatabases`.
+- **Modo temporal de recuperación (`--mode=recover-plat05b-serialization --operation-id=<uuid>`):** implementado en [`RecoverPlat05bSerializationIncidentHandler.cs`](../src/Saas.Platform.Api/Features/Provisioning/RecoverPlat05bSerializationIncidentHandler.cs) y [`ProvisioningLeaseStore.cs`](../src/Saas.Platform.Api/Features/Provisioning/ProvisioningLeaseStore.cs).
+  - Permanece restringido de forma estricta a la operación del incidente histórico (`TenantId: 01a214af-fddc-713e-a908-c1f690486d90`, `OperationId: 01a214af-fddc-75c8-9c5e-7f2317a4e6c2`, `InfrastructureResourceRef: saas-tenant-databases/pg-01a214affddc713ea908c1f690486d90@84fb9b6c-b40a-4c85-b822-810907498f73`), exigiendo estado `PENDIENTE_ADMIN`, `FAILED_TERMINAL`, `last_error_code = 'CNPG_ROLE_CONFLICT'`, resumen exacto, `attempt_count = 2` (preservando presupuesto `MaxTotalAttempts = 4`), `InfrastructureInstance = CONFIRMED`, etapas restantes `PENDING`, ausencia de *lease* y soporte activo de `ServiceDatabases`.
+  - Transiciona atómicamente a `FAILED_RETRYABLE` con `manual_intervention_required = FALSE` y `next_attempt_at_utc = @utcNow` sin incrementar `attempt_count` ni `lease_version` y sin ejecutar el aprovisionamiento directamente.
+  - El modo ordinario `--mode=resume-operation` permanece inalterado y continúa rechazando operaciones en `FAILED_TERMINAL`.
+  - **AVISO OBLIGATORIO:** `--mode=recover-plat05b-serialization` es estrictamente temporal para este incidente y **debe retirarse antes de promocionar a `main`**.

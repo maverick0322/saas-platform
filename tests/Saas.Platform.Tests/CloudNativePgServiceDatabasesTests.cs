@@ -519,6 +519,297 @@ public sealed class CloudNativePgServiceDatabasesTests
         Assert.Equal(0, resourceClient.SecretReplaceCount);
     }
 
+    [Fact]
+    public void DatabaseRoleSnapshot_NormalizesOmittedDefaultFalseBooleansWithoutWeakeningSecurityOrStatus()
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterName = CloudNativePgClusterSpec.BuildClusterName(TenantId);
+        var roleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(TenantId);
+
+        // Fixture derivada de contrato CNPG v1.30.2 (RoleConfiguration con `omitempty` en los 6 bool false;
+        // en saas-infra no existe volcado JSON crudo capturado del recurso real).
+        var reconciledOmittingBooleansJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "eee4ce4c-f650-471a-8e59-01cc13ac0be9",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: null,
+            applied: true,
+            observedGeneration: 1);
+
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(reconciledOmittingBooleansJson, out var omittedSnapshot));
+        Assert.NotNull(omittedSnapshot);
+        Assert.False(omittedSnapshot.Login);
+        Assert.False(omittedSnapshot.Superuser);
+        Assert.False(omittedSnapshot.Createdb);
+        Assert.False(omittedSnapshot.Createrole);
+        Assert.False(omittedSnapshot.Replication);
+        Assert.False(omittedSnapshot.BypassRls);
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Ready,
+            omittedSnapshot.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false).Kind);
+
+        // Booleanos explícitos en false también son válidos
+        var explicitFalseJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "eee4ce4c-f650-471a-8e59-01cc13ac0be9",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: """
+                ,
+                "login": false,
+                "superuser": false,
+                "createdb": false,
+                "createrole": false,
+                "replication": false,
+                "bypassrls": false
+                """,
+            applied: true,
+            observedGeneration: 1);
+
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(explicitFalseJson, out var explicitFalseSnapshot));
+        Assert.NotNull(explicitFalseSnapshot);
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Ready,
+            explicitFalseSnapshot.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false).Kind);
+
+        // login=true + passwordSecret válido con los 5 booleanos administrativos omitidos
+        var authSecretName = ServiceDatabaseTarget.Identity.BuildAuthSecretName(TenantId);
+        var activeLoginJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "eee4ce4c-f650-471a-8e59-01cc13ac0be9",
+            generation: 2,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: $$"""
+                ,
+                "login": true,
+                "passwordSecret": { "name": "{{authSecretName}}" }
+                """,
+            applied: true,
+            observedGeneration: 2);
+
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(activeLoginJson, out var activeSnapshot));
+        Assert.NotNull(activeSnapshot);
+        Assert.True(activeSnapshot.Login);
+        Assert.False(activeSnapshot.Superuser);
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Ready,
+            activeSnapshot.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: true, authSecretName).Kind);
+    }
+
+    [Theory]
+    [InlineData("superuser")]
+    [InlineData("createdb")]
+    [InlineData("createrole")]
+    [InlineData("replication")]
+    [InlineData("bypassrls")]
+    public void DatabaseRoleSnapshot_RejectsElevatedPrivilegeBooleanWhenExplicitlyTrue(string privilegeField)
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterName = CloudNativePgClusterSpec.BuildClusterName(TenantId);
+        var roleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(TenantId);
+
+        var elevatedJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "role-elevated-uid",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: $$"""
+                ,
+                "{{privilegeField}}": true
+                """,
+            applied: true,
+            observedGeneration: 1);
+
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(elevatedJson, out var snapshot));
+        var eval = snapshot!.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false);
+        Assert.Equal(ServiceResourceEvaluationKind.TerminalConflict, eval.Kind);
+        Assert.Equal("CNPG_ROLE_CONFLICT", eval.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData("login", "null")]
+    [InlineData("superuser", "null")]
+    [InlineData("createdb", "\"false\"")]
+    [InlineData("createrole", "0")]
+    [InlineData("replication", "{}")]
+    [InlineData("bypassrls", "[]")]
+    public void DatabaseRoleSnapshot_FailsClosedOnExplicitNullOrInvalidBooleanTypes(string propertyName, string rawJsonValue)
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterName = CloudNativePgClusterSpec.BuildClusterName(TenantId);
+        var roleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(TenantId);
+
+        var malformedJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "role-malformed-uid",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: $$"""
+                ,
+                "{{propertyName}}": {{rawJsonValue}}
+                """,
+            applied: true,
+            observedGeneration: 1);
+
+        Assert.False(CloudNativePgDatabaseRoleSnapshot.TryParse(malformedJson, out var snapshot));
+        Assert.Null(snapshot);
+    }
+
+    [Fact]
+    public void DatabaseRoleSnapshot_KeepsStatusAppliedAndObservedGenerationUnnormalizedWhenMissingOrFalseOrStale()
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterName = CloudNativePgClusterSpec.BuildClusterName(TenantId);
+        var roleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(TenantId);
+
+        var missingAppliedJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "role-no-applied",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: null,
+            applied: null,
+            observedGeneration: 1);
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(missingAppliedJson, out var missingApplied));
+        Assert.Null(missingApplied!.Applied);
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Reconciling,
+            missingApplied.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false).Kind);
+
+        var falseAppliedJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "role-false-applied",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: null,
+            applied: false,
+            observedGeneration: 1);
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(falseAppliedJson, out var falseApplied));
+        Assert.False(falseApplied!.Applied);
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Reconciling,
+            falseApplied.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false).Kind);
+
+        var missingObservedGenJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "role-no-obsgen",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: null,
+            applied: true,
+            observedGeneration: null);
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(missingObservedGenJson, out var missingObservedGen));
+        Assert.Null(missingObservedGen!.ObservedGeneration);
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Reconciling,
+            missingObservedGen.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false).Kind);
+
+        var staleObservedGenJson = BuildDatabaseRoleJson(
+            roleName,
+            options.Namespace,
+            "role-stale-obsgen",
+            generation: 2,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: null,
+            applied: true,
+            observedGeneration: 1);
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(staleObservedGenJson, out var staleObservedGen));
+        Assert.Equal(
+            ServiceResourceEvaluationKind.Reconciling,
+            staleObservedGen!.Evaluate(context, options, ServiceDatabaseTarget.Identity, clusterName, requireLoginReady: false).Kind);
+    }
+
+    [Fact]
+    public async Task StageHandler_ReusesPreExistingIdentityDatabaseRoleWithOmittedBooleansWithoutRecreatingAndCompletesStage()
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterName = CloudNativePgClusterSpec.BuildClusterName(TenantId);
+        var clusterClient = new FakeClusterClient(BuildReadyCluster(options, context, ClusterUid, CloudNativePgClusterSpec.RequiredServicePgHbaRules));
+        var resourceClient = new InMemoryServiceResourcesClient(options);
+        var sqlVerifier = new RecordingSqlVerifier();
+
+        var preExistingIdentityRoleJson = BuildDatabaseRoleJson(
+            ServiceDatabaseTarget.Identity.BuildRoleResourceName(TenantId),
+            options.Namespace,
+            "eee4ce4c-f650-471a-8e59-01cc13ac0be9",
+            generation: 1,
+            context,
+            ServiceDatabaseTarget.Identity,
+            clusterName,
+            extraSpecProperties: null,
+            applied: true,
+            observedGeneration: 1);
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(preExistingIdentityRoleJson, out var preExistingIdentityRole));
+        resourceClient.Roles[(options.Namespace, preExistingIdentityRole!.Name)] = preExistingIdentityRole;
+
+        var handler = new CloudNativePgServiceDatabasesStageHandler(
+            clusterClient,
+            resourceClient,
+            sqlVerifier,
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance);
+
+        var result = await handler.ExecuteAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.StageVerified, result.Outcome);
+
+        // Identity se reutilizó sin CREATE; únicamente Clinical ejecutó CREATE de DatabaseRole.
+        Assert.Equal([ServiceDatabaseTarget.Clinical.BuildRoleResourceName(TenantId)], resourceClient.CreatedRoleNames);
+        Assert.Equal(2, resourceClient.RoleReplaceCount);
+        Assert.Equal("eee4ce4c-f650-471a-8e59-01cc13ac0be9", resourceClient.Roles[(options.Namespace, preExistingIdentityRole.Name)].Uid);
+        Assert.True(sqlVerifier.PreLoginVerified);
+        Assert.Equal(["identity", "clinical"], sqlVerifier.RevokedServices);
+        Assert.True(sqlVerifier.PostLoginMatrixVerified);
+    }
+
+    [Fact]
+    public void HostFactory_ResolvesTemporaryRecoveryCliModeWithoutRegisteringInApiHost()
+    {
+        Assert.Equal(
+            PlatformRuntimeMode.RecoverPlat05bSerialization,
+            PlatformHostFactory.ResolveRuntimeMode(["--mode=recover-plat05b-serialization"]));
+
+        Assert.Equal(
+            PlatformRuntimeMode.ResumeOperation,
+            PlatformHostFactory.ResolveRuntimeMode(["--mode=resume-operation"]));
+
+        using var apiApp = PlatformHostFactory.CreateApiApplication(
+            ["--ConnectionStrings:PlatformDatabase=Host=localhost;Database=synthetic;Username=synthetic;Password=synthetic"]);
+        Assert.Null(apiApp.Services.GetService<RecoverPlat05bSerializationIncidentHandler>());
+    }
+
     [Theory]
     [InlineData("CNPG_PGHBA_NOT_APPLIED")]
     [InlineData("CNPG_ROLE_WAIT")]
@@ -615,6 +906,61 @@ public sealed class CloudNativePgServiceDatabasesTests
             1,
             pgHba,
             $"{CloudNativePgClusterSpec.BuildClusterName(context.TenantId)}-rw");
+
+    private static JsonElement BuildDatabaseRoleJson(
+        string name,
+        string @namespace,
+        string uid,
+        long generation,
+        ProvisioningStageContext context,
+        ServiceDatabaseTarget target,
+        string clusterName,
+        string? extraSpecProperties,
+        bool? applied,
+        long? observedGeneration)
+    {
+        var statusFields = new List<string>();
+        if (applied.HasValue)
+        {
+            statusFields.Add($"\"applied\": {(applied.Value ? "true" : "false")}");
+        }
+
+        if (observedGeneration.HasValue)
+        {
+            statusFields.Add($"\"observedGeneration\": {observedGeneration.Value}");
+        }
+
+        var json = $$"""
+            {
+              "apiVersion": "postgresql.cnpg.io/v1",
+              "kind": "DatabaseRole",
+              "metadata": {
+                "name": "{{name}}",
+                "namespace": "{{@namespace}}",
+                "uid": "{{uid}}",
+                "resourceVersion": "{{generation}}",
+                "generation": {{generation}},
+                "labels": {
+                  "{{CloudNativePgClusterSpec.ManagedByLabelKey}}": "{{CloudNativePgClusterSpec.ManagedByLabelValue}}",
+                  "{{CloudNativePgClusterSpec.TenantIdLabelKey}}": "{{context.TenantId:D}}",
+                  "{{CloudNativePgClusterSpec.OperationIdLabelKey}}": "{{context.OperationId:D}}",
+                  "{{ServiceDatabaseTarget.ServiceLabelKey}}": "{{target.ServiceKey}}"
+                }
+              },
+              "spec": {
+                "cluster": { "name": "{{clusterName}}" },
+                "name": "{{target.RoleName}}",
+                "ensure": "present",
+                "databaseRoleReclaimPolicy": "retain"{{extraSpecProperties ?? string.Empty}}
+              },
+              "status": {
+                {{string.Join(", ", statusFields)}}
+              }
+            }
+            """;
+
+        return JsonSerializer.Deserialize<JsonElement>(json);
+    }
 
     private sealed class FakeClusterClient(CloudNativePgClusterSnapshot cluster) : ICloudNativePgClusterClient
     {
@@ -729,6 +1075,7 @@ public sealed class CloudNativePgServiceDatabasesTests
         public bool ForceRoleGenerationMismatch { get; init; }
         public bool SimulateNextDistributionConflict { get; set; }
         public int RoleReplaceCount { get; private set; }
+        public List<string> CreatedRoleNames { get; } = [];
         public int AuthSecretCreateCount { get; private set; }
         public int SecretReplaceCount { get; private set; }
 
@@ -746,6 +1093,7 @@ public sealed class CloudNativePgServiceDatabasesTests
             CancellationToken cancellationToken)
         {
             var snapshot = ParseRoleFromManifest(manifest, ForceRoleGenerationMismatch ? 0L : 1L);
+            CreatedRoleNames.Add(snapshot.Name);
             Roles[(@namespace, snapshot.Name)] = snapshot;
             return Task.FromResult(new KubernetesResourceCallResult<CloudNativePgDatabaseRoleSnapshot>(KubernetesResourceCallStatus.Created, snapshot));
         }
@@ -760,6 +1108,7 @@ public sealed class CloudNativePgServiceDatabasesTests
             var existing = Roles[(@namespace, name)];
             var nextGen = (existing.Generation ?? 1) + 1;
             var snapshot = ParseRoleFromManifest(manifest, ForceRoleGenerationMismatch ? nextGen - 1 : nextGen, nextGen);
+            snapshot = snapshot with { Uid = existing.Uid };
             Roles[(@namespace, name)] = snapshot;
             return Task.FromResult(new KubernetesResourceCallResult<CloudNativePgDatabaseRoleSnapshot>(KubernetesResourceCallStatus.Replaced, snapshot));
         }

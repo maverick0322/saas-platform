@@ -305,12 +305,25 @@ internal sealed record CloudNativePgDatabaseRoleSnapshot(
             roleName = KubernetesJsonParser.GetStringOrNull(spec, "name");
             ensure = KubernetesJsonParser.GetStringOrNull(spec, "ensure");
             reclaimPolicy = KubernetesJsonParser.GetStringOrNull(spec, "databaseRoleReclaimPolicy");
-            login = KubernetesJsonParser.GetBoolOrNull(spec, "login");
-            superuser = KubernetesJsonParser.GetBoolOrNull(spec, "superuser");
-            createdb = KubernetesJsonParser.GetBoolOrNull(spec, "createdb");
-            createrole = KubernetesJsonParser.GetBoolOrNull(spec, "createrole");
-            replication = KubernetesJsonParser.GetBoolOrNull(spec, "replication");
-            bypassRls = KubernetesJsonParser.GetBoolOrNull(spec, "bypassrls");
+
+            // CloudNativePG v1.30.2 serializes Go bool fields with `omitempty` when false.
+            // Normalize only the 6 accredited RoleConfiguration booleans while failing closed on explicit null or non-boolean JSON values.
+            if (!TryReadDefaultFalseBool(spec, "login", out var parsedLogin)
+                || !TryReadDefaultFalseBool(spec, "superuser", out var parsedSuperuser)
+                || !TryReadDefaultFalseBool(spec, "createdb", out var parsedCreatedb)
+                || !TryReadDefaultFalseBool(spec, "createrole", out var parsedCreaterole)
+                || !TryReadDefaultFalseBool(spec, "replication", out var parsedReplication)
+                || !TryReadDefaultFalseBool(spec, "bypassrls", out var parsedBypassRls))
+            {
+                return false;
+            }
+
+            login = parsedLogin;
+            superuser = parsedSuperuser;
+            createdb = parsedCreatedb;
+            createrole = parsedCreaterole;
+            replication = parsedReplication;
+            bypassRls = parsedBypassRls;
 
             if (spec.TryGetProperty("passwordSecret", out var passwordSecret) && passwordSecret.ValueKind == JsonValueKind.Object)
             {
@@ -352,6 +365,30 @@ internal sealed record CloudNativePgDatabaseRoleSnapshot(
             secretResourceVersion);
 
         return true;
+    }
+
+    private static bool TryReadDefaultFalseBool(JsonElement spec, string propertyName, out bool value)
+    {
+        if (!spec.TryGetProperty(propertyName, out var property))
+        {
+            value = false;
+            return true;
+        }
+
+        if (property.ValueKind == JsonValueKind.False)
+        {
+            value = false;
+            return true;
+        }
+
+        if (property.ValueKind == JsonValueKind.True)
+        {
+            value = true;
+            return true;
+        }
+
+        value = false;
+        return false;
     }
 
     public ServiceResourceEvaluation Evaluate(

@@ -552,6 +552,348 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
         Assert.Equal(KubernetesResourceCallStatus.NotFound, authGet.Status);
     }
 
+    [Fact]
+    public async Task RecoverPlat05bSerialization_RecoversAuthorizedLabOperationAllowsLeaseContinuationAndReusesIdentityRole()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = await CreateMigratedIsolatedDatabaseAsync("plat05b_fix2_recover", ct);
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 11, 26, 5, 0, 0, TimeSpan.Zero));
+        var provisioningRequestId = "req-plat05b-fix2-lab";
+
+        await SeedAuthorizedPlat05bIncidentAsync(
+            connectionString,
+            Plat05bSerializationIncidentContract.AuthorizedTenantId,
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            provisioningRequestId,
+            clock.GetUtcNow(),
+            ct);
+
+        var optionsEnabled = CreateEnabledOptions(serviceDatabasesEnabled: true);
+        var clusterSnapshot = BuildReadyCluster(
+            Plat05bSerializationIncidentContract.AuthorizedTenantId,
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            "84fb9b6c-b40a-4c85-b822-810907498f73",
+            optionsEnabled);
+
+        var resourcesClient = new InMemoryResourcesClient(optionsEnabled);
+
+        // Pre-seed de DatabaseRole existente de Identity tal como lo serializa CNPG v1.30.2 (6 booleanos omitidos)
+        var identityRoleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(Plat05bSerializationIncidentContract.AuthorizedTenantId);
+        var existingIdentityRoleJson = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>($$"""
+            {
+              "apiVersion": "postgresql.cnpg.io/v1",
+              "kind": "DatabaseRole",
+              "metadata": {
+                "name": "{{identityRoleName}}",
+                "namespace": "{{optionsEnabled.Namespace}}",
+                "uid": "eee4ce4c-f650-471a-8e59-01cc13ac0be9",
+                "resourceVersion": "101",
+                "generation": 1,
+                "labels": {
+                  "{{CloudNativePgClusterSpec.ManagedByLabelKey}}": "{{CloudNativePgClusterSpec.ManagedByLabelValue}}",
+                  "{{CloudNativePgClusterSpec.TenantIdLabelKey}}": "{{Plat05bSerializationIncidentContract.AuthorizedTenantId:D}}",
+                  "{{CloudNativePgClusterSpec.OperationIdLabelKey}}": "{{Plat05bSerializationIncidentContract.AuthorizedOperationId:D}}",
+                  "{{ServiceDatabaseTarget.ServiceLabelKey}}": "{{ServiceDatabaseTarget.Identity.ServiceKey}}"
+                }
+              },
+              "spec": {
+                "cluster": { "name": "{{CloudNativePgClusterSpec.BuildClusterName(Plat05bSerializationIncidentContract.AuthorizedTenantId)}}" },
+                "name": "identity_owner",
+                "ensure": "present",
+                "databaseRoleReclaimPolicy": "retain"
+              },
+              "status": {
+                "applied": true,
+                "observedGeneration": 1
+              }
+            }
+            """);
+        Assert.True(CloudNativePgDatabaseRoleSnapshot.TryParse(existingIdentityRoleJson, out var preExistingIdentityRole));
+        resourcesClient.SeedRole(preExistingIdentityRole!);
+
+        await using var db = fixture.CreateDbContext(connectionString);
+        var leaseStore = new ProvisioningLeaseStore(db);
+        var executor = new CloudNativePgProvisioningStageExecutor(
+            new StaticClusterClient(clusterSnapshot),
+            optionsEnabled,
+            clock,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance,
+            new CloudNativePgServiceDatabasesStageHandler(
+                new StaticClusterClient(clusterSnapshot),
+                resourcesClient,
+                new AlwaysPassSqlVerifier(),
+                optionsEnabled,
+                clock,
+                NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance));
+
+        // 1. La reanudacion ordinaria (--mode=resume-operation) DEBE seguir rechazando FAILED_TERMINAL
+        var ordinaryResume = new ResumeProvisioningOperationHandler(
+            leaseStore,
+            executor,
+            clock,
+            CreateWorkerOptions(),
+            NullLogger<ResumeProvisioningOperationHandler>.Instance);
+        var rejectedOrdinaryResume = await ordinaryResume.HandleAsync(
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            ct);
+        Assert.False(rejectedOrdinaryResume.Resumed);
+        Assert.Equal(ResumeProvisioningOperationOutcome.InvalidStatusOrReason, rejectedOrdinaryResume.Outcome);
+
+        // 2. Recuperacion excepcional habilita la operacion sin avanzar attempt_count ni lease_version ni ejecutar etapas
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var recoveryHandler = new RecoverPlat05bSerializationIncidentHandler(
+            leaseStore,
+            executor,
+            clock,
+            CreateWorkerOptions(),
+            NullLogger<RecoverPlat05bSerializationIncidentHandler>.Instance);
+        var recoveryResult = await recoveryHandler.HandleAsync(
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            ct);
+        Assert.True(recoveryResult.Recovered);
+        Assert.Equal(RecoverPlat05bSerializationOutcome.Recovered, recoveryResult.Outcome);
+        Assert.Equal(Plat05bSerializationIncidentContract.AuthorizedTenantId, recoveryResult.TenantId);
+        Assert.Equal(2, recoveryResult.AttemptCount);
+
+        var recoveredOp = await db.TenantProvisioningOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == Plat05bSerializationIncidentContract.AuthorizedOperationId, ct);
+        Assert.Equal(ProvisioningOperationStatus.FailedRetryable, recoveredOp.Status);
+        Assert.False(recoveredOp.ManualInterventionRequired);
+        Assert.Equal(clock.GetUtcNow(), recoveredOp.NextAttemptAtUtc);
+        Assert.Null(recoveredOp.LastErrorCode);
+        Assert.Null(recoveredOp.LastErrorSummary);
+        Assert.Equal(2, recoveredOp.AttemptCount);
+        Assert.Equal(7L, recoveredOp.LeaseVersion);
+        Assert.Equal(provisioningRequestId, recoveredOp.ProvisioningRequestId);
+        Assert.Equal(Plat05bSerializationIncidentContract.AuthorizedTenantId, recoveredOp.TenantId);
+        Assert.Equal(ProvisioningStageState.Confirmed, recoveredOp.InfrastructureStageState);
+        Assert.Equal(Plat05bSerializationIncidentContract.AuthorizedInfrastructureResourceRef, recoveredOp.InfrastructureResourceRef);
+
+        // 3. El Worker ordinario adquiere por lease, reutiliza el DatabaseRole existente de Identity sin recrearlo y completa ServiceDatabases
+        var processor = new ProvisioningOperationProcessor(
+            leaseStore,
+            executor,
+            clock,
+            CreateWorkerOptions(),
+            NullLogger<ProvisioningOperationProcessor>.Instance);
+        var workerCycle = await processor.ProcessNextAsync("worker-plat05b-fix2", ct);
+        Assert.Equal(ProvisioningCycleOutcome.AdapterNotConfigured, workerCycle.Outcome);
+        Assert.Equal(ProvisioningStage.ClinicalPreparation, workerCycle.LastStage);
+        Assert.Equal(3, workerCycle.AttemptCount);
+
+        Assert.Equal(
+            [ServiceDatabaseTarget.Clinical.BuildRoleResourceName(Plat05bSerializationIncidentContract.AuthorizedTenantId)],
+            resourcesClient.CreatedRoleNames);
+
+        await using var finalDb = fixture.CreateDbContext(connectionString);
+        var finalOp = await finalDb.TenantProvisioningOperations.AsNoTracking()
+            .SingleAsync(x => x.Id == Plat05bSerializationIncidentContract.AuthorizedOperationId, ct);
+        var finalTenant = await finalDb.Tenants.AsNoTracking()
+            .SingleAsync(t => t.Id == Plat05bSerializationIncidentContract.AuthorizedTenantId, ct);
+
+        Assert.Equal(ProvisioningStageState.Confirmed, finalOp.InfrastructureStageState);
+        Assert.Equal(ProvisioningStageState.Confirmed, finalOp.ServiceDatabasesStageState);
+        Assert.Equal(ProvisioningStageState.Pending, finalOp.ClinicalStageState);
+        Assert.Equal(ProvisioningStageState.Pending, finalOp.IdentityStageState);
+        Assert.Equal(ProvisioningOperationStatus.FailedRetryable, finalOp.Status);
+        Assert.Equal("ADAPTER_NOT_CONFIGURED", finalOp.LastErrorCode);
+        Assert.True(finalOp.ManualInterventionRequired);
+        Assert.Null(finalOp.NextAttemptAtUtc);
+        Assert.Equal(3, finalOp.AttemptCount);
+        Assert.Equal(8L, finalOp.LeaseVersion);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, finalTenant.OperationalState);
+        Assert.False(finalTenant.MayAuthenticate);
+    }
+
+    [Fact]
+    public async Task RecoverPlat05bSerialization_EnforcesStrictWhitelistGuardsBudgetAndConcurrency()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = await CreateMigratedIsolatedDatabaseAsync("plat05b_fix2_guards", ct);
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 11, 26, 6, 0, 0, TimeSpan.Zero));
+        await SeedAuthorizedPlat05bIncidentAsync(
+            connectionString,
+            Plat05bSerializationIncidentContract.AuthorizedTenantId,
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            "req-plat05b-fix2-guards",
+            clock.GetUtcNow(),
+            ct);
+
+        await using var db = fixture.CreateDbContext(connectionString);
+        var store = new ProvisioningLeaseStore(db);
+
+        // 1. OperationId distinto al autorizado
+        var wrongOp = await store.TryRecoverPlat05bSerializationIncidentAsync(
+            Guid.NewGuid(),
+            clock.GetUtcNow(),
+            maxTotalAttempts: 4,
+            supportsServiceDatabases: true,
+            ct);
+        Assert.False(wrongOp.Recovered);
+        Assert.Equal(RecoverPlat05bSerializationOutcome.UnauthorizedOperation, wrongOp.Outcome);
+
+        // 2. ServiceDatabases no soportado en configuracion
+        var unsupportedAdapter = await store.TryRecoverPlat05bSerializationIncidentAsync(
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            clock.GetUtcNow(),
+            maxTotalAttempts: 4,
+            supportsServiceDatabases: false,
+            ct);
+        Assert.False(unsupportedAdapter.Recovered);
+        Assert.Equal(RecoverPlat05bSerializationOutcome.NextStageAdapterNotConfigured, unsupportedAdapter.Outcome);
+
+        // 3. Presupuesto de intentos agotado (attempt_count=2 >= maxTotalAttempts=2)
+        var exhaustedBudget = await store.TryRecoverPlat05bSerializationIncidentAsync(
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            clock.GetUtcNow(),
+            maxTotalAttempts: 2,
+            supportsServiceDatabases: true,
+            ct);
+        Assert.False(exhaustedBudget.Recovered);
+        Assert.Equal(RecoverPlat05bSerializationOutcome.AttemptBudgetExhausted, exhaustedBudget.Outcome);
+
+        // 4. Error summary / error code / attempt_count / infra ref distintos al incidente autorizado
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET last_error_summary = 'Different summary' WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+        Assert.Equal(
+            RecoverPlat05bSerializationOutcome.InvalidStatusOrReason,
+            (await store.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct)).Outcome);
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET last_error_summary = {Plat05bSerializationIncidentContract.ExpectedErrorSummary}, last_error_code = 'CNPG_CLUSTER_OWNERSHIP_CONFLICT' WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+        Assert.Equal(
+            RecoverPlat05bSerializationOutcome.InvalidStatusOrReason,
+            (await store.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct)).Outcome);
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET last_error_code = {Plat05bSerializationIncidentContract.ExpectedErrorCode}, attempt_count = 1 WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+        Assert.Equal(
+            RecoverPlat05bSerializationOutcome.InvalidStatusOrReason,
+            (await store.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct)).Outcome);
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET attempt_count = 2, infrastructure_resource_ref = 'saas-tenant-databases/other@uid' WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+        Assert.Equal(
+            RecoverPlat05bSerializationOutcome.InvalidStageStateOrReference,
+            (await store.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct)).Outcome);
+
+        // 5. Lease activo / estado IN_PROGRESS
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET infrastructure_resource_ref = {Plat05bSerializationIncidentContract.AuthorizedInfrastructureResourceRef}, status = 'IN_PROGRESS', lease_owner = 'worker-x', lease_until_utc = {clock.GetUtcNow().AddMinutes(1)} WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+        Assert.Equal(
+            RecoverPlat05bSerializationOutcome.ActiveLease,
+            (await store.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct)).Outcome);
+
+        // 6. Estado distinto de FAILED_TERMINAL (ej. FAILED_RETRYABLE)
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET status = 'FAILED_RETRYABLE', lease_owner = NULL, lease_until_utc = NULL WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+        Assert.Equal(
+            RecoverPlat05bSerializationOutcome.InvalidStatusOrReason,
+            (await store.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct)).Outcome);
+
+        // Restaurar estado exacto del incidente y comprobar concurrencia: solo 1 ejecucion gana
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE platform.tenant_provisioning_operations SET status = 'FAILED_TERMINAL', manual_intervention_required = TRUE, next_attempt_at_utc = NULL WHERE id = {Plat05bSerializationIncidentContract.AuthorizedOperationId};",
+            ct);
+
+        var storeA = new ProvisioningLeaseStore(fixture.CreateDbContext(connectionString));
+        var storeB = new ProvisioningLeaseStore(fixture.CreateDbContext(connectionString));
+        var concurrentResults = await Task.WhenAll(
+            storeA.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct),
+            storeB.TryRecoverPlat05bSerializationIncidentAsync(Plat05bSerializationIncidentContract.AuthorizedOperationId, clock.GetUtcNow(), 4, true, ct));
+
+        Assert.Equal(1, concurrentResults.Count(r => r.Recovered));
+        Assert.Equal(1, concurrentResults.Count(r => !r.Recovered && r.Outcome == RecoverPlat05bSerializationOutcome.InvalidStatusOrReason));
+
+        // 7. TenantId distinto aunque OperationId coincida -> UnauthorizedOperation
+        var wrongTenantDb = await CreateMigratedIsolatedDatabaseAsync("plat05b_fix2_wrongtenant", ct);
+        await SeedAuthorizedPlat05bIncidentAsync(
+            wrongTenantDb,
+            Guid.NewGuid(),
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            "req-plat05b-fix2-wrong-tenant",
+            clock.GetUtcNow(),
+            ct);
+        await using var wrongTenantCtx = fixture.CreateDbContext(wrongTenantDb);
+        var wrongTenantStore = new ProvisioningLeaseStore(wrongTenantCtx);
+        var wrongTenantResult = await wrongTenantStore.TryRecoverPlat05bSerializationIncidentAsync(
+            Plat05bSerializationIncidentContract.AuthorizedOperationId,
+            clock.GetUtcNow(),
+            maxTotalAttempts: 4,
+            supportsServiceDatabases: true,
+            ct);
+        Assert.False(wrongTenantResult.Recovered);
+        Assert.Equal(RecoverPlat05bSerializationOutcome.UnauthorizedOperation, wrongTenantResult.Outcome);
+    }
+
+    private async Task SeedAuthorizedPlat05bIncidentAsync(
+        string connectionString,
+        Guid tenantId,
+        Guid operationId,
+        string provisioningRequestId,
+        DateTimeOffset timestampUtc,
+        CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(connectionString);
+        await conn.OpenAsync(ct);
+
+        const string insertTenantSql = """
+            INSERT INTO platform.tenants (
+                id, public_id, name, contact_email, max_active_accounts,
+                operational_state, created_at_utc, updated_at_utc, concurrency_stamp)
+            VALUES (
+                @id, @publicId, @name, @contactEmail, 10,
+                'PENDIENTE_ADMIN', @ts, @ts, @stamp);
+            """;
+
+        await using (var cmd = new NpgsqlCommand(insertTenantSql, conn))
+        {
+            cmd.Parameters.AddWithValue("id", tenantId);
+            cmd.Parameters.AddWithValue("publicId", $"lab-{tenantId:N}"[..24]);
+            cmd.Parameters.AddWithValue("name", "Clinica Lab Sintetica");
+            cmd.Parameters.AddWithValue("contactEmail", "lab@synthetic.test");
+            cmd.Parameters.AddWithValue("ts", timestampUtc);
+            cmd.Parameters.AddWithValue("stamp", Guid.NewGuid());
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        const string insertOpSql = """
+            INSERT INTO platform.tenant_provisioning_operations (
+                id, tenant_id, provisioning_request_id, initial_admin_full_name, initial_admin_email,
+                status, attempt_count, last_error_code, last_error_summary,
+                created_at_utc, updated_at_utc, last_attempt_at_utc, completed_at_utc, concurrency_stamp,
+                lease_owner, lease_until_utc, lease_version, next_attempt_at_utc, manual_intervention_required,
+                infrastructure_stage_state, service_databases_stage_state, clinical_stage_state, identity_stage_state,
+                infrastructure_resource_ref, clinical_migration_version, initial_admin_account_id)
+            VALUES (
+                @opId, @tenantId, @reqId, 'Admin Sintetico', 'admin@synthetic.test',
+                'FAILED_TERMINAL', 2, @errCode, @errSummary,
+                @ts, @ts, @ts, NULL, @stamp,
+                NULL, NULL, 7, NULL, TRUE,
+                'CONFIRMED', 'PENDING', 'PENDING', 'PENDING',
+                @infraRef, NULL, NULL);
+            """;
+
+        await using (var cmd = new NpgsqlCommand(insertOpSql, conn))
+        {
+            cmd.Parameters.AddWithValue("opId", operationId);
+            cmd.Parameters.AddWithValue("tenantId", tenantId);
+            cmd.Parameters.AddWithValue("reqId", provisioningRequestId);
+            cmd.Parameters.AddWithValue("errCode", Plat05bSerializationIncidentContract.ExpectedErrorCode);
+            cmd.Parameters.AddWithValue("errSummary", Plat05bSerializationIncidentContract.ExpectedErrorSummary);
+            cmd.Parameters.AddWithValue("ts", timestampUtc);
+            cmd.Parameters.AddWithValue("stamp", Guid.NewGuid());
+            cmd.Parameters.AddWithValue("infraRef", Plat05bSerializationIncidentContract.AuthorizedInfrastructureResourceRef);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+    }
+
     private async Task<string> CreateMigratedIsolatedDatabaseAsync(string prefix, CancellationToken ct)
     {
         var dbName = $"{prefix}_{Guid.NewGuid():N}"[..36];
@@ -702,6 +1044,11 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
         private readonly Dictionary<(string, string), CloudNativePgDatabaseSnapshot> _databases = new();
         private readonly Dictionary<(string, string), (Dictionary<string, string> Labels, Dictionary<string, string> Data, string Type)> _secrets = new();
 
+        public List<string> CreatedRoleNames { get; } = [];
+
+        public void SeedRole(CloudNativePgDatabaseRoleSnapshot role)
+            => _roles[(role.Namespace, role.Name)] = role;
+
         public InMemoryResourcesClient(CloudNativePgOptions options)
         {
             _secrets[(options.ServiceDatabases.IdentityDistributionSecret.Namespace, options.ServiceDatabases.IdentityDistributionSecret.Name)] =
@@ -728,6 +1075,7 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
             var json = System.Text.Json.JsonSerializer.SerializeToElement(manifest);
             CloudNativePgDatabaseRoleSnapshot.TryParse(json, out var parsed);
             var snapshot = parsed! with { Uid = $"{parsed.Name}-uid", ResourceVersion = "1", Generation = 1, Applied = true, ObservedGeneration = 1 };
+            CreatedRoleNames.Add(snapshot.Name);
             _roles[(@namespace, snapshot.Name)] = snapshot;
             return Task.FromResult(new KubernetesResourceCallResult<CloudNativePgDatabaseRoleSnapshot>(KubernetesResourceCallStatus.Created, snapshot));
         }
@@ -736,7 +1084,9 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
         {
             var json = System.Text.Json.JsonSerializer.SerializeToElement(manifest);
             CloudNativePgDatabaseRoleSnapshot.TryParse(json, out var parsed);
-            var snapshot = parsed! with { Uid = $"{parsed.Name}-uid", ResourceVersion = "2", Generation = 2, Applied = true, ObservedGeneration = 2 };
+            var existing = _roles[(@namespace, name)];
+            var nextGen = (existing.Generation ?? 1) + 1;
+            var snapshot = parsed! with { Uid = existing.Uid ?? $"{parsed.Name}-uid", ResourceVersion = nextGen.ToString(), Generation = nextGen, Applied = true, ObservedGeneration = nextGen };
             _roles[(@namespace, name)] = snapshot;
             return Task.FromResult(new KubernetesResourceCallResult<CloudNativePgDatabaseRoleSnapshot>(KubernetesResourceCallStatus.Replaced, snapshot));
         }
