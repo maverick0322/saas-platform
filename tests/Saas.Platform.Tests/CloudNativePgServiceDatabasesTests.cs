@@ -41,6 +41,8 @@ public sealed class CloudNativePgServiceDatabasesTests
         Assert.Null(apiApp.Services.GetService<ICloudNativePgServiceDatabaseResourcesClient>());
         Assert.Null(apiApp.Services.GetService<IServiceDatabaseSqlVerifier>());
         Assert.Null(apiApp.Services.GetService<ResumeProvisioningOperationHandler>());
+        Assert.Equal(PlatformRuntimeMode.ResumeOperation, PlatformHostFactory.ResolveRuntimeMode(["--mode=resume-operation"]));
+        Assert.Equal(PlatformRuntimeMode.Api, PlatformHostFactory.ResolveRuntimeMode(["--mode=recover-plat05b-serialization"]));
     }
 
     [Fact]
@@ -792,22 +794,6 @@ public sealed class CloudNativePgServiceDatabasesTests
         Assert.True(sqlVerifier.PreLoginVerified);
         Assert.Equal(["identity", "clinical"], sqlVerifier.RevokedServices);
         Assert.True(sqlVerifier.PostLoginMatrixVerified);
-    }
-
-    [Fact]
-    public void HostFactory_ResolvesTemporaryRecoveryCliModeWithoutRegisteringInApiHost()
-    {
-        Assert.Equal(
-            PlatformRuntimeMode.RecoverPlat05bSerialization,
-            PlatformHostFactory.ResolveRuntimeMode(["--mode=recover-plat05b-serialization"]));
-
-        Assert.Equal(
-            PlatformRuntimeMode.ResumeOperation,
-            PlatformHostFactory.ResolveRuntimeMode(["--mode=resume-operation"]));
-
-        using var apiApp = PlatformHostFactory.CreateApiApplication(
-            ["--ConnectionStrings:PlatformDatabase=Host=localhost;Database=synthetic;Username=synthetic;Password=synthetic"]);
-        Assert.Null(apiApp.Services.GetService<RecoverPlat05bSerializationIncidentHandler>());
     }
 
     [Theory]

@@ -20,8 +20,7 @@ public enum PlatformRuntimeMode
 {
     Api = 0,
     Worker = 1,
-    ResumeOperation = 2,
-    RecoverPlat05bSerialization = 3
+    ResumeOperation = 2
 }
 
 /// <summary>
@@ -34,11 +33,6 @@ public static class PlatformHostFactory
     {
         foreach (var arg in args)
         {
-            if (string.Equals(arg, "--mode=recover-plat05b-serialization", StringComparison.OrdinalIgnoreCase))
-            {
-                return PlatformRuntimeMode.RecoverPlat05bSerialization;
-            }
-
             if (string.Equals(arg, "--mode=resume-operation", StringComparison.OrdinalIgnoreCase))
             {
                 return PlatformRuntimeMode.ResumeOperation;
@@ -194,11 +188,6 @@ public static class PlatformHostFactory
         Action<IServiceCollection>? configureServices = null)
         => BuildProvisioningHost(args, includeHostedWorkerService: false, configureServices);
 
-    public static IHost CreateRecoverPlat05bSerializationHost(
-        string[] args,
-        Action<IServiceCollection>? configureServices = null)
-        => BuildProvisioningHost(args, includeHostedWorkerService: false, configureServices);
-
     private static IHost BuildProvisioningHost(
         string[] args,
         bool includeHostedWorkerService,
@@ -258,7 +247,6 @@ public static class PlatformHostFactory
         builder.Services.AddScoped<ProvisioningLeaseStore>();
         builder.Services.AddScoped<ProvisioningOperationProcessor>();
         builder.Services.AddScoped<ResumeProvisioningOperationHandler>();
-        builder.Services.AddScoped<RecoverPlat05bSerializationIncidentHandler>();
 
         if (includeHostedWorkerService)
         {

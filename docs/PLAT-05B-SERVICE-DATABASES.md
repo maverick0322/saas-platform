@@ -1,9 +1,9 @@
 # PLAT-05B — Aprovisionamiento automático de bases privadas por servicio (`ServiceDatabases`)
 
-**Estado:** `IMPLEMENTATION_PASS` (verificado localmente con Docker `.NET 10`, PostgreSQL 17 real con TLS/SCRAM/`pg_hba` y dobles controlados de Kubernetes; integración real contra K3s y CloudNativePG `1.30.2` pendiente)  
+**Estado:** `INTEGRATION_PASS` (`2026-11-26`, verificado en K3s `1.37.2`, CloudNativePG `1.30.2` y PostgreSQL `17.12`; cerrado en `PLAT-05B-CLOSE`)  
 **Repositorio:** `maverick0322/saas-platform`  
-**Rama:** `feature/plat-05b-service-databases` (base `develop` `d96848230eb42e00f3834f973705b3ac720f2e74`)  
-**Referencias externas:** `maverick0322/saas-infra@a8bb77b7`, `Eugene1805/saas-identity@a374584b`, CloudNativePG `v1.30.2`
+**Ramas / commits relevantes:** `develop` (`c8041c145e2292665cef67e5c848239bd95ad3aa`), cierre en `chore/plat-05b-close`  
+**Referencias externas:** `maverick0322/saas-infra@571f0605` ([`docs/INFRA-PLAT-05B.md`](https://github.com/maverick0322/saas-infra/blob/571f06056f1e58dea0a58b50ef9f274793dbbdf1/docs/INFRA-PLAT-05B.md)), `Eugene1805/saas-identity@a374584b`, CloudNativePG `v1.30.2`
 
 ---
 
@@ -107,19 +107,19 @@ Deshabilitado por defecto en [`appsettings.json`](../src/Saas.Platform.Api/appse
          - host all identity_owner,clinical_owner all reject
    ```
    y verificar el rollout ordenado/estado `Cluster in healthy state`.
-4. **Limitaciones pendientes:** falta validación real en K3s con CloudNativePG `1.30.2`, prueba real de consumo por `Identity` y `Clinical` (`PLAT-05C`), verificación de CA del servidor PostgreSQL en DSNs de consumidores y rotación automática de credenciales.
+4. **Limitaciones históricas superadas y seguimiento de cierre:** la integración real en K3s con CloudNativePG `1.30.2` quedó validada el `2026-11-26` (Sección 9); permanecen fuera de este incremento el consumo real por `Identity` y `Clinical` (`PLAT-05C`), la validación de CA del servidor PostgreSQL y las etapas posteriores (`ClinicalPreparation` e `IdentityPreparation`).
 
 ---
 
-## 8. Incidente de serialización CNPG (`PLAT-05B-FIX-2`) y recuperación excepcional
+## 8. Incidente histórico de serialización CNPG (`PLAT-05B-FIX-2`) y retiro del mecanismo temporal (`PLAT-05B-CLOSE`)
 
 ### 8.1 Causa raíz y auditoría de esquema CloudNativePG `v1.30.2`
 
-Durante la integración real de `PLAT-05B`, CloudNativePG `1.30.2` reconcilió correctamente el `DatabaseRole` inicial de Identity (`role-01a214affddc713ea908c1f690486d90-identity`), pero Kubernetes devolvió el objeto omitiendo las 6 propiedades booleanas de `RoleConfiguration` con valor `false` debido a las etiquetas Go `json:"...,omitempty"` en `api/v1/cluster_types.go`:
+Durante la primera ejecución en K3s real de `PLAT-05B` (intento `2`), CloudNativePG `1.30.2` reconcilió correctamente el `DatabaseRole` inicial de Identity (`role-01a214affddc713ea908c1f690486d90-identity`, `UID: eee4ce4c-f650-471a-8e59-01cc13ac0be9`), confirmándose de forma independiente en PostgreSQL que `identity_owner` estaba en `NOLOGIN` y sin privilegios administrativos. Sin embargo, Kubernetes devolvió el objeto omitiendo las 6 propiedades booleanas de `RoleConfiguration` con valor `false` debido a las etiquetas Go `json:"...,omitempty"` en `api/v1/cluster_types.go`:
 
 - `login`, `superuser`, `createdb`, `createrole`, `replication`, `bypassrls`.
 
-El parser anterior (`KubernetesJsonParser.GetBoolOrNull`) interpretaba propiedades ausentes como `null`, causando que `CloudNativePgDatabaseRoleSnapshot.Evaluate` (`!= false`) rechazara falsamente el recurso con `CNPG_ROLE_CONFLICT` (`FAILED_TERMINAL`).
+El parser anterior (`KubernetesJsonParser.GetBoolOrNull`) interpretaba propiedades ausentes como `null`, provocando que `CloudNativePgDatabaseRoleSnapshot.Evaluate` (`!= false`) detuviera falsamente la operación en `FAILED_TERMINAL` (`CNPG_ROLE_CONFLICT`).
 
 **Auditoría acotada sobre `DatabaseRole` y `Database` (`cloudnative-pg/cloudnative-pg@v1.30.2`):**
 
@@ -127,11 +127,26 @@ El parser anterior (`KubernetesJsonParser.GetBoolOrNull`) interpretaba propiedad
 - `ensure` (`+kubebuilder:default:="present"`) y `databaseRoleReclaimPolicy` / `databaseReclaimPolicy` (`+kubebuilder:default:=retain`) poseen valores por defecto en el esquema OpenAPI del CRD aplicados en admisión por Kubernetes, por lo que no requieren normalización especulativa.
 - `status.applied` (`*bool`) y `status.observedGeneration` (`int64`) conservan su semántica original sin normalizar ausencia a `false`.
 
-### 8.2 Reutilización del `DatabaseRole` existente de Identity y recuperación excepcional temporal
+### 8.2 Uso satisfactorio y retiro definitivo de `--mode=recover-plat05b-serialization`
 
-- Al corregir el borde de deserialización, el flujo ordinario de [`CloudNativePgServiceDatabasesStageHandler.cs`](../src/Saas.Platform.Api/Features/Provisioning/CloudNativePgServiceDatabasesStageHandler.cs) detecta y reutiliza mediante `GET` el `DatabaseRole` existente de Identity (`UID: eee4ce4c-f650-471a-8e59-01cc13ac0be9`) sin recrearlo ni eliminarlo, y continúa con `Clinical` y los pasos restantes hasta completar `ServiceDatabases`.
-- **Modo temporal de recuperación (`--mode=recover-plat05b-serialization --operation-id=<uuid>`):** implementado en [`RecoverPlat05bSerializationIncidentHandler.cs`](../src/Saas.Platform.Api/Features/Provisioning/RecoverPlat05bSerializationIncidentHandler.cs) y [`ProvisioningLeaseStore.cs`](../src/Saas.Platform.Api/Features/Provisioning/ProvisioningLeaseStore.cs).
-  - Permanece restringido de forma estricta a la operación del incidente histórico (`TenantId: 01a214af-fddc-713e-a908-c1f690486d90`, `OperationId: 01a214af-fddc-75c8-9c5e-7f2317a4e6c2`, `InfrastructureResourceRef: saas-tenant-databases/pg-01a214affddc713ea908c1f690486d90@84fb9b6c-b40a-4c85-b822-810907498f73`), exigiendo estado `PENDIENTE_ADMIN`, `FAILED_TERMINAL`, `last_error_code = 'CNPG_ROLE_CONFLICT'`, resumen exacto, `attempt_count = 2` (preservando presupuesto `MaxTotalAttempts = 4`), `InfrastructureInstance = CONFIRMED`, etapas restantes `PENDING`, ausencia de *lease* y soporte activo de `ServiceDatabases`.
-  - Transiciona atómicamente a `FAILED_RETRYABLE` con `manual_intervention_required = FALSE` y `next_attempt_at_utc = @utcNow` sin incrementar `attempt_count` ni `lease_version` y sin ejecutar el aprovisionamiento directamente.
-  - El modo ordinario `--mode=resume-operation` permanece inalterado y continúa rechazando operaciones en `FAILED_TERMINAL`.
-  - **AVISO OBLIGATORIO:** `--mode=recover-plat05b-serialization` es estrictamente temporal para este incidente y **debe retirarse antes de promocionar a `main`**.
+- Con el correctivo **`PLAT-05B-FIX-2`** (`PR #21`, commit `0f992f49`, integrado en `develop` en `c8041c14`, CI post-merge `45776954150` `SUCCESS` con `187/187` pruebas), el mecanismo excepcional `--mode=recover-plat05b-serialization --operation-id=01a214af-fddc-75c8-9c5e-7f2317a4e6c2` se ejecutó una única vez con código de salida `0`, preservando `attempt_count = 2` y `lease_version = 2` sin modificar SQL manualmente ni ampliar el presupuesto de reintentos (`MaxTotalAttempts = 4`).
+- Posteriormente, la adquisición ordinaria del Worker en el intento `3` (`lease_version = 3`) detectó y **reutilizó** el `DatabaseRole` existente de Identity (`UID: eee4ce4c-f650-471a-8e59-01cc13ac0be9`) sin recrear tenant, operación, `Cluster`, PVC ni rol, completando `ServiceDatabases`.
+- **Cierre (`PLAT-05B-CLOSE`):** cumplido su propósito único en laboratorio, todo el mecanismo temporal (`RecoverPlat05bSerializationIncidentHandler`, `TryRecoverPlat05bSerializationIncidentAsync`, `Plat05bSerializationIncidentContract`, modo CLI `--mode=recover-plat05b-serialization` y sus `3` pruebas exclusivas) fue **eliminado definitivamente**. El comando ordinario `--mode=resume-operation` continúa rechazando `FAILED_TERMINAL`, y la suite queda en **`184/184`** pruebas aprobadas (reducción exclusivamente atribuible al retiro de las `3` pruebas del mecanismo temporal).
+
+---
+
+## 9. Evidencia de integración real (`INTEGRATION_PASS`, 2026-11-26) y cierre
+
+Según la evidencia independiente registrada en [`saas-infra/docs/INFRA-PLAT-05B.md`](https://github.com/maverick0322/saas-infra/blob/571f06056f1e58dea0a58b50ef9f274793dbbdf1/docs/INFRA-PLAT-05B.md):
+
+- **Preparación de seguridad:** `32/32` comprobaciones RBAC efectivas aprobadas, `22/22` pruebas *dry-run* de admisión aprobadas, las 4 políticas adicionales de admisión validadas sin advertencias, `17` recursos de manifiesto sin deriva y reglas `pg_hba` requeridas verificadas.
+- **Aceptación funcional y aislamiento en PostgreSQL `17.12` (CNPG `1.30.2` sobre K3s `1.37.2`):**
+  - Exactamente `2` `DatabaseRole` y `2` `Database` reconciliados (`identity` con propietario `identity_owner`, `clinical` con propietario `clinical_owner`), ambos con `LOGIN`, sin privilegios administrativos y con `PUBLIC CONNECT` revocado.
+  - Credenciales independientes, entradas de distribución coincidentes, `2` sesiones TLS exitosas con propietario/base esperados y `10` sondas negativas rechazadas por `pg_hba` o ACL (acceso cruzado, sin TLS y hacia `app`, `postgres` y `template1`).
+  - `3` `Cluster` PostgreSQL saludables, `3` PVC `Bound`, UID (`84fb9b6c-b40a-4c85-b822-810907498f73`) y PVC originales del tenant preservados, y Argo CD (`cloudnativepg` y `saas-platform`) `Synced/Healthy`.
+- **Estado durable final verificado:**
+  - Tenant `01a214af-fddc-713e-a908-c1f690486d90`: `PENDIENTE_ADMIN`, `mayAuthenticate = false`.
+  - Operación `01a214af-fddc-75c8-9c5e-7f2317a4e6c2`: `InfrastructureInstance = CONFIRMED`, `ServiceDatabases = CONFIRMED`, `ClinicalPreparation = PENDING`, `IdentityPreparation = PENDING`, `status = FAILED_RETRYABLE`, `last_error_code = ADAPTER_NOT_CONFIGURED`, `manual_intervention_required = true`, `next_attempt_at_utc = NULL`, `AttemptCount = 3`, `LeaseVersion = 3`, cardinalidad del catálogo `1` tenant / `1` operación y Worker detenido en `0/0`.
+- **Fronteras y seguimiento posterior:**
+  - El consumo real de las bases por `Identity` y `Clinical` (`PLAT-05C`), el aislamiento multitenant con múltiples clínicas vivas, la verificación de identidad del certificado CA del servidor y respaldo/HA/carga permanecen fuera de alcance de `PLAT-05B`.
+  - Bajo el presupuesto conservador vigente (`MaxAutomaticRetries = 3` → `MaxTotalAttempts = 4`), únicamente resta `1` intento disponible tras `AttemptCount = 3`; esta restricción deberá revisarse antes de implementar `ClinicalPreparation` e `IdentityPreparation` (sin alterarla en este cierre). `LAB-10` permanece pospuesto.
