@@ -173,48 +173,18 @@ internal static class CloudNativePgClusterEvaluator
 
     public static bool HasRequiredServicePgHbaRules(IReadOnlyList<string>? pgHbaRules)
     {
-        if (pgHbaRules is null || pgHbaRules.Count < CloudNativePgClusterSpec.RequiredServicePgHbaRules.Count)
+        if (pgHbaRules is null || pgHbaRules.Count != CloudNativePgClusterSpec.RequiredServicePgHbaRules.Count)
         {
             return false;
         }
 
-        var allowIdentity = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[0]);
-        var allowClinical = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[1]);
-        var rejectOwners = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[2]);
-
-        var normalized = pgHbaRules.Select(NormalizeHbaLine).ToList();
-        var allowIdentityIndex = normalized.IndexOf(allowIdentity);
-        var allowClinicalIndex = normalized.IndexOf(allowClinical);
-        var rejectIndex = normalized.IndexOf(rejectOwners);
-
-        if (allowIdentityIndex < 0 || allowClinicalIndex < 0 || rejectIndex < 0)
+        for (var i = 0; i < CloudNativePgClusterSpec.RequiredServicePgHbaRules.Count; i++)
         {
-            return false;
-        }
-
-        if (allowIdentityIndex > rejectIndex || allowClinicalIndex > rejectIndex)
-        {
-            return false;
-        }
-
-        // Ninguna otra regla previa al reject puede conceder acceso amplio a identity_owner, clinical_owner o all.
-        for (var i = 0; i < rejectIndex; i++)
-        {
-            if (i == allowIdentityIndex || i == allowClinicalIndex)
+            var expected = NormalizeHbaLine(CloudNativePgClusterSpec.RequiredServicePgHbaRules[i]);
+            var actual = NormalizeHbaLine(pgHbaRules[i]);
+            if (!string.Equals(actual, expected, StringComparison.Ordinal))
             {
-                continue;
-            }
-
-            var tokens = normalized[i].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length >= 4 && !tokens[^1].Equals("reject", StringComparison.OrdinalIgnoreCase))
-            {
-                var users = tokens[3];
-                if (users.Contains("identity_owner", StringComparison.Ordinal)
-                    || users.Contains("clinical_owner", StringComparison.Ordinal)
-                    || string.Equals(users, "all", StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
+                return false;
             }
         }
 

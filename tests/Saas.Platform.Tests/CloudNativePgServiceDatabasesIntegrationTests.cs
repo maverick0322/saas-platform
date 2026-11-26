@@ -47,6 +47,7 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
             su - postgres -c "psql -v ON_ERROR_STOP=1 -d postgres" <<SQL
             CREATE ROLE identity_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             CREATE ROLE clinical_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            CREATE DATABASE app;
             CREATE DATABASE identity OWNER identity_owner;
             CREATE DATABASE clinical OWNER clinical_owner;
             SQL
@@ -118,7 +119,7 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
             ct);
         Assert.Equal(0, ownerSchemaResult.ExitCode);
 
-        // 6. Matriz negativa post-LOGIN completa (8 combinaciones rechazadas)
+        // 6. Matriz negativa post-LOGIN completa (10 combinaciones rechazadas, incluyendo base 'app' de CNPG)
         var passwords = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             [ServiceDatabaseTarget.Identity.ServiceKey] = identityPassword,
@@ -440,6 +441,117 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
         Assert.False(tenant.MayAuthenticate);
     }
 
+    [Fact]
+    public async Task ProcessNextAsync_DoesNotConfirmServiceDatabasesWhenAuthSecretMissingForActiveRoleOrDistributionInvalid()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = await CreateMigratedIsolatedDatabaseAsync("plat05b_fix_guard", ct);
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 11, 26, 4, 0, 0, TimeSpan.Zero));
+        var (tenantId, operationId, _) = await RegisterSyntheticTenantAsync(
+            connectionString,
+            "cln-plat05b-fixguard",
+            clock,
+            ct);
+
+        var optionsEnabled = CreateEnabledOptions(serviceDatabasesEnabled: true);
+        const string clusterUid = "84fb9b6c-b40a-4c85-b822-810907498f73";
+        var clusterSnapshot = BuildReadyCluster(tenantId, operationId, clusterUid, optionsEnabled);
+
+        await using var db = fixture.CreateDbContext(connectionString);
+        var leaseStore = new ProvisioningLeaseStore(db);
+
+        var acquired = await leaseStore.TryAcquireNextAsync("worker-s1-guard", clock.GetUtcNow(), TimeSpan.FromMinutes(1), 4, ct);
+        Assert.NotNull(acquired);
+        Assert.True(await leaseStore.TryRecordStageConfirmedAsync(
+            acquired.Token,
+            ProvisioningStage.InfrastructureInstance,
+            $"{optionsEnabled.Namespace}/{CloudNativePgClusterSpec.BuildClusterName(tenantId)}@{clusterUid}",
+            clock.GetUtcNow(),
+            ct));
+        Assert.True(await leaseStore.TryReleaseWithRecoverableFailureAsync(
+            acquired.Token,
+            null,
+            "ADAPTER_NOT_CONFIGURED",
+            "Ready for stage 2",
+            clock.GetUtcNow(),
+            null,
+            manualInterventionRequired: true,
+            cancellationToken: ct));
+
+        var resourcesClient = new InMemoryResourcesClient(optionsEnabled);
+        var idRoleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(tenantId);
+        await resourcesClient.CreateDatabaseRoleAsync(
+            optionsEnabled.Namespace,
+            ServiceDatabaseTarget.BuildDatabaseRoleManifest(
+                new ProvisioningStageContext(
+                    operationId,
+                    tenantId,
+                    "cln-plat05b-fixguard",
+                    "Clinica Guard",
+                    "req-guard",
+                    "Admin",
+                    "admin@synthetic.test",
+                    ProvisioningStage.ServiceDatabases,
+                    false,
+                    2,
+                    $"{optionsEnabled.Namespace}/{CloudNativePgClusterSpec.BuildClusterName(tenantId)}@{clusterUid}",
+                    null,
+                    null),
+                optionsEnabled,
+                ServiceDatabaseTarget.Identity,
+                CloudNativePgClusterSpec.BuildClusterName(tenantId),
+                loginEnabled: true,
+                passwordSecretName: ServiceDatabaseTarget.Identity.BuildAuthSecretName(tenantId)),
+            ct);
+
+        var executor = new CloudNativePgProvisioningStageExecutor(
+            new StaticClusterClient(clusterSnapshot),
+            optionsEnabled,
+            clock,
+            NullLogger<CloudNativePgProvisioningStageExecutor>.Instance,
+            new CloudNativePgServiceDatabasesStageHandler(
+                new StaticClusterClient(clusterSnapshot),
+                resourcesClient,
+                new AlwaysPassSqlVerifier(),
+                optionsEnabled,
+                clock,
+                NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance));
+
+        var resumeHandler = new ResumeProvisioningOperationHandler(
+            leaseStore,
+            executor,
+            clock,
+            CreateWorkerOptions(),
+            NullLogger<ResumeProvisioningOperationHandler>.Instance);
+        Assert.True((await resumeHandler.HandleAsync(operationId, ct)).Resumed);
+
+        var processor = new ProvisioningOperationProcessor(
+            leaseStore,
+            executor,
+            clock,
+            CreateWorkerOptions(),
+            NullLogger<ProvisioningOperationProcessor>.Instance);
+
+        var result = await processor.ProcessNextAsync("worker-s2-guard", ct);
+        Assert.Equal(ProvisioningCycleOutcome.TerminalFailed, result.Outcome);
+
+        var op = await db.TenantProvisioningOperations.AsNoTracking().SingleAsync(x => x.Id == operationId, ct);
+        var tenant = await db.Tenants.AsNoTracking().SingleAsync(t => t.Id == tenantId, ct);
+        Assert.Equal(ProvisioningOperationStatus.FailedTerminal, op.Status);
+        Assert.Equal("CNPG_AUTH_SECRET_CONFLICT", op.LastErrorCode);
+        Assert.Equal(ProvisioningStageState.Confirmed, op.InfrastructureStageState);
+        Assert.NotEqual(ProvisioningStageState.Confirmed, op.ServiceDatabasesStageState);
+        Assert.Equal(TenantOperationalState.PendienteAdmin, tenant.OperationalState);
+        Assert.False(tenant.MayAuthenticate);
+
+        // No debe haber regenerado el auth Secret ni escrito en el Secret de distribucion
+        var authGet = await resourcesClient.GetSecretAsync(
+            optionsEnabled.Namespace,
+            ServiceDatabaseTarget.Identity.BuildAuthSecretName(tenantId),
+            ct);
+        Assert.Equal(KubernetesResourceCallStatus.NotFound, authGet.Status);
+    }
+
     private async Task<string> CreateMigratedIsolatedDatabaseAsync(string prefix, CancellationToken ct)
     {
         var dbName = $"{prefix}_{Guid.NewGuid():N}"[..36];
@@ -593,10 +705,18 @@ public sealed class CloudNativePgServiceDatabasesIntegrationTests(PostgreSqlFixt
         public InMemoryResourcesClient(CloudNativePgOptions options)
         {
             _secrets[(options.ServiceDatabases.IdentityDistributionSecret.Namespace, options.ServiceDatabases.IdentityDistributionSecret.Name)] =
-                (new Dictionary<string, string>(StringComparer.Ordinal), new Dictionary<string, string>(StringComparer.Ordinal), "Opaque");
+                (CreateDistributionLabels(ServiceDatabaseTarget.Identity), new Dictionary<string, string>(StringComparer.Ordinal), ServiceDatabaseTarget.OpaqueSecretType);
             _secrets[(options.ServiceDatabases.ClinicalDistributionSecret.Namespace, options.ServiceDatabases.ClinicalDistributionSecret.Name)] =
-                (new Dictionary<string, string>(StringComparer.Ordinal), new Dictionary<string, string>(StringComparer.Ordinal), "Opaque");
+                (CreateDistributionLabels(ServiceDatabaseTarget.Clinical), new Dictionary<string, string>(StringComparer.Ordinal), ServiceDatabaseTarget.OpaqueSecretType);
         }
+
+        private static Dictionary<string, string> CreateDistributionLabels(ServiceDatabaseTarget target)
+            => new(StringComparer.Ordinal)
+            {
+                [CloudNativePgClusterSpec.ManagedByLabelKey] = CloudNativePgClusterSpec.ManagedByLabelValue,
+                [ServiceDatabaseTarget.PurposeLabelKey] = ServiceDatabaseTarget.DistributionPurposeLabelValue,
+                [ServiceDatabaseTarget.ServiceLabelKey] = target.ServiceKey
+            };
 
         public Task<KubernetesResourceCallResult<CloudNativePgDatabaseRoleSnapshot>> GetDatabaseRoleAsync(string @namespace, string name, CancellationToken cancellationToken)
             => Task.FromResult(_roles.TryGetValue((@namespace, name), out var role)

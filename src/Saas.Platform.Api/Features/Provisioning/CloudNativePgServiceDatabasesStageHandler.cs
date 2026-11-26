@@ -148,13 +148,28 @@ internal sealed class CloudNativePgServiceDatabasesStageHandler(
         var passwordsByService = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var target in ServiceDatabaseTarget.MandatoryTargets)
         {
-            var (password, secretFailure) = await EnsureAuthSecretAsync(context, target, cancellationToken);
+            var (password, secretFailure) = await EnsureAuthSecretAsync(
+                context,
+                target,
+                rolesByService[target.ServiceKey],
+                cancellationToken);
             if (secretFailure is not null)
             {
                 return secretFailure;
             }
 
             passwordsByService[target.ServiceKey] = password!;
+        }
+
+        if (string.Equals(
+                passwordsByService[ServiceDatabaseTarget.Identity.ServiceKey],
+                passwordsByService[ServiceDatabaseTarget.Clinical.ServiceKey],
+                StringComparison.Ordinal))
+        {
+            return new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.TerminalFailure,
+                ErrorCode: "CNPG_AUTH_SECRET_CONFLICT",
+                ErrorSummary: "Identity and Clinical authentication Secrets must use independent credentials.");
         }
 
         // Paso 5a: Comprobar en vivo las restricciones de pg_hba antes de habilitar LOGIN.
@@ -505,6 +520,7 @@ internal sealed class CloudNativePgServiceDatabasesStageHandler(
     private async Task<(string? Password, ProvisioningStageResult? Failure)> EnsureAuthSecretAsync(
         ProvisioningStageContext context,
         ServiceDatabaseTarget target,
+        CloudNativePgDatabaseRoleSnapshot currentRole,
         CancellationToken cancellationToken)
     {
         var secretName = target.BuildAuthSecretName(context.TenantId);
@@ -523,6 +539,51 @@ internal sealed class CloudNativePgServiceDatabasesStageHandler(
         if (getResult.Status != KubernetesResourceCallStatus.NotFound)
         {
             return (null, MapKubernetesFailure(getResult, "CNPG_API_UNAVAILABLE"));
+        }
+
+        // Nunca regenerar contraseña si el rol ya está habilitado o vinculado a un passwordSecret.
+        if (currentRole.Login == true
+            || !string.IsNullOrWhiteSpace(currentRole.PasswordSecretName)
+            || !string.IsNullOrWhiteSpace(currentRole.SecretResourceVersion))
+        {
+            return (null, new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.TerminalFailure,
+                ErrorCode: "CNPG_AUTH_SECRET_CONFLICT",
+                ErrorSummary: $"DatabaseRole for service '{target.ServiceKey}' is already active or bound while its authentication Secret is missing."));
+        }
+
+        // Nunca regenerar contraseña si ya existe una conexión distribuida para el tenant y servicio.
+        var distSecretConfig = ServiceDatabaseTarget.ResolveDistributionSecret(target, options.ServiceDatabases);
+        var distSecretResult = await resourcesClient.GetSecretAsync(distSecretConfig.Namespace, distSecretConfig.Name, cancellationToken);
+        if (distSecretResult.Status == KubernetesResourceCallStatus.NotFound)
+        {
+            return (null, new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.TerminalFailure,
+                ErrorCode: "CNPG_DISTRIBUTION_SECRET_MISSING",
+                ErrorSummary: $"Pre-existing distribution Secret for service '{target.ServiceKey}' was not found."));
+        }
+
+        if (distSecretResult.Status != KubernetesResourceCallStatus.Found)
+        {
+            return (null, MapKubernetesFailure(distSecretResult, "CNPG_API_UNAVAILABLE"));
+        }
+
+        var distSecret = distSecretResult.Snapshot!;
+        if (!distSecret.TryValidateDistributionSecret(target))
+        {
+            return (null, new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.TerminalFailure,
+                ErrorCode: "CNPG_DISTRIBUTION_SECRET_CONFLICT",
+                ErrorSummary: $"Pre-existing distribution Secret for service '{target.ServiceKey}' is incompatible with consumer distribution requirements."));
+        }
+
+        var entryKey = ServiceDatabaseTarget.BuildDistributionEntryKey(context.TenantId);
+        if (distSecret.Data.ContainsKey(entryKey))
+        {
+            return (null, new ProvisioningStageResult(
+                ProvisioningStageOutcomeKind.TerminalFailure,
+                ErrorCode: "CNPG_AUTH_SECRET_CONFLICT",
+                ErrorSummary: $"A distributed connection already exists for service '{target.ServiceKey}' while its authentication Secret is missing."));
         }
 
         var generatedPassword = ServiceDatabaseTarget.GenerateSecurePassword();
@@ -674,12 +735,12 @@ internal sealed class CloudNativePgServiceDatabasesStageHandler(
             }
 
             var existingSecret = getResult.Snapshot!;
-            if (!string.IsNullOrWhiteSpace(existingSecret.DeletionTimestamp))
+            if (!existingSecret.TryValidateDistributionSecret(target))
             {
                 return new ProvisioningStageResult(
                     ProvisioningStageOutcomeKind.TerminalFailure,
                     ErrorCode: "CNPG_DISTRIBUTION_SECRET_CONFLICT",
-                    ErrorSummary: $"Distribution Secret for service '{target.ServiceKey}' is marked for deletion.");
+                    ErrorSummary: $"Distribution Secret for service '{target.ServiceKey}' is deleting, not Opaque, or lacks expected consumer identification.");
             }
 
             if (existingSecret.Data.TryGetValue(entryKey, out var existingEntry))

@@ -20,9 +20,11 @@ internal sealed class NpgsqlServiceDatabaseSqlVerifier(
         {
             (ServiceDatabaseTarget.Identity.RoleName, ServiceDatabaseTarget.Clinical.DatabaseName, SslMode.Require),
             (ServiceDatabaseTarget.Identity.RoleName, ServiceDatabaseTarget.Identity.DatabaseName, SslMode.Disable),
+            (ServiceDatabaseTarget.Identity.RoleName, "app", SslMode.Require),
             (ServiceDatabaseTarget.Identity.RoleName, "postgres", SslMode.Require),
             (ServiceDatabaseTarget.Clinical.RoleName, ServiceDatabaseTarget.Identity.DatabaseName, SslMode.Require),
             (ServiceDatabaseTarget.Clinical.RoleName, ServiceDatabaseTarget.Clinical.DatabaseName, SslMode.Disable),
+            (ServiceDatabaseTarget.Clinical.RoleName, "app", SslMode.Require),
             (ServiceDatabaseTarget.Clinical.RoleName, "postgres", SslMode.Require)
         };
 
@@ -190,6 +192,8 @@ internal sealed class NpgsqlServiceDatabaseSqlVerifier(
             (ServiceDatabaseTarget.Clinical.RoleName, clinicalPassword, ServiceDatabaseTarget.Clinical.DatabaseName, SslMode.Disable),
             (ServiceDatabaseTarget.Identity.RoleName, identityPassword, ServiceDatabaseTarget.Clinical.DatabaseName, SslMode.Require),
             (ServiceDatabaseTarget.Clinical.RoleName, clinicalPassword, ServiceDatabaseTarget.Identity.DatabaseName, SslMode.Require),
+            (ServiceDatabaseTarget.Identity.RoleName, identityPassword, "app", SslMode.Require),
+            (ServiceDatabaseTarget.Clinical.RoleName, clinicalPassword, "app", SslMode.Require),
             (ServiceDatabaseTarget.Identity.RoleName, identityPassword, "postgres", SslMode.Require),
             (ServiceDatabaseTarget.Clinical.RoleName, clinicalPassword, "postgres", SslMode.Require),
             (ServiceDatabaseTarget.Identity.RoleName, identityPassword, "template1", SslMode.Require),

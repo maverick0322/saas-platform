@@ -140,6 +140,47 @@ public sealed class CloudNativePgServiceDatabasesTests
         Assert.Equal(
             "CNPG_PGHBA_NOT_CONFIGURED",
             CloudNativePgClusterEvaluator.EvaluateForServiceDatabases(permissiveBeforeReject, context, options, ClusterUid).ErrorCode);
+
+        var permissiveSpecificAddressRule = BuildReadyCluster(
+            new CloudNativePgOptions(),
+            context,
+            ClusterUid,
+            [
+                "hostssl identity identity_owner all scram-sha-256",
+                "hostssl clinical identity_owner 10.42.0.0/16 scram-sha-256",
+                "hostssl clinical clinical_owner all scram-sha-256",
+                "host all identity_owner,clinical_owner all reject"
+            ]);
+        Assert.Equal(
+            "CNPG_PGHBA_NOT_CONFIGURED",
+            CloudNativePgClusterEvaluator.EvaluateForServiceDatabases(permissiveSpecificAddressRule, context, options, ClusterUid).ErrorCode);
+
+        var swappedAllowOrder = BuildReadyCluster(
+            new CloudNativePgOptions(),
+            context,
+            ClusterUid,
+            [
+                "hostssl clinical clinical_owner all scram-sha-256",
+                "hostssl identity identity_owner all scram-sha-256",
+                "host all identity_owner,clinical_owner all reject"
+            ]);
+        Assert.Equal(
+            "CNPG_PGHBA_NOT_CONFIGURED",
+            CloudNativePgClusterEvaluator.EvaluateForServiceDatabases(swappedAllowOrder, context, options, ClusterUid).ErrorCode);
+
+        var extraRuleAfterReject = BuildReadyCluster(
+            new CloudNativePgOptions(),
+            context,
+            ClusterUid,
+            [
+                "hostssl identity identity_owner all scram-sha-256",
+                "hostssl clinical clinical_owner all scram-sha-256",
+                "host all identity_owner,clinical_owner all reject",
+                "hostssl app identity_owner 10.42.0.0/16 scram-sha-256"
+            ]);
+        Assert.Equal(
+            "CNPG_PGHBA_NOT_CONFIGURED",
+            CloudNativePgClusterEvaluator.EvaluateForServiceDatabases(extraRuleAfterReject, context, options, ClusterUid).ErrorCode);
     }
 
     [Fact]
@@ -332,6 +373,152 @@ public sealed class CloudNativePgServiceDatabasesTests
         Assert.Contains("Password=mismatch", idSecretAfter.Data[ServiceDatabaseTarget.BuildDistributionEntryKey(TenantId)], StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task StageHandler_RefusesToRegenerateCredentialsWhenRoleActiveOrConnectionDistributedOrPasswordsEqual()
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterClient = new FakeClusterClient(BuildReadyCluster(options, context, ClusterUid, CloudNativePgClusterSpec.RequiredServicePgHbaRules));
+
+        // 1. Rol ya activo/vinculado pero falta pg-auth-* -> CNPG_AUTH_SECRET_CONFLICT sin crear Secret ni mutar el rol
+        var activeRoleClient = new InMemoryServiceResourcesClient(options);
+        var idRoleName = ServiceDatabaseTarget.Identity.BuildRoleResourceName(TenantId);
+        var idAuthSecretName = ServiceDatabaseTarget.Identity.BuildAuthSecretName(TenantId);
+        activeRoleClient.Roles[(options.Namespace, idRoleName)] = new CloudNativePgDatabaseRoleSnapshot(
+            idRoleName,
+            options.Namespace,
+            "role-uid",
+            "2",
+            2,
+            null,
+            ServiceDatabaseTarget.BuildResourceLabels(context, ServiceDatabaseTarget.Identity),
+            CloudNativePgClusterSpec.BuildClusterName(TenantId),
+            "identity_owner",
+            "present",
+            "retain",
+            Login: true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            idAuthSecretName,
+            true,
+            2,
+            "1");
+
+        var activeRoleHandler = new CloudNativePgServiceDatabasesStageHandler(
+            clusterClient,
+            activeRoleClient,
+            new RecordingSqlVerifier(),
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance);
+
+        var activeRoleResult = await activeRoleHandler.ExecuteAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TerminalFailure, activeRoleResult.Outcome);
+        Assert.Equal("CNPG_AUTH_SECRET_CONFLICT", activeRoleResult.ErrorCode);
+        Assert.Equal(0, activeRoleClient.AuthSecretCreateCount);
+        Assert.Equal(0, activeRoleClient.RoleReplaceCount);
+
+        // 2. Rol aun NOLOGIN pero ya existe conexion distribuida en Secret de consumidor -> CNPG_AUTH_SECRET_CONFLICT sin regenerar
+        var distributedExistsClient = new InMemoryServiceResourcesClient(options);
+        var idDistSecret = distributedExistsClient.Secrets[(options.ServiceDatabases.IdentityDistributionSecret.Namespace, options.ServiceDatabases.IdentityDistributionSecret.Name)];
+        idDistSecret.Data[ServiceDatabaseTarget.BuildDistributionEntryKey(TenantId)] =
+            "Host=pg-rw;Database=identity;Username=identity_owner;Password=already-issued;SSL Mode=Require";
+
+        var distributedExistsHandler = new CloudNativePgServiceDatabasesStageHandler(
+            clusterClient,
+            distributedExistsClient,
+            new RecordingSqlVerifier(),
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance);
+
+        var distributedResult = await distributedExistsHandler.ExecuteAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TerminalFailure, distributedResult.Outcome);
+        Assert.Equal("CNPG_AUTH_SECRET_CONFLICT", distributedResult.ErrorCode);
+        Assert.Equal(0, distributedExistsClient.AuthSecretCreateCount);
+
+        // 3. Dos Secrets existentes con la misma contraseña -> CNPG_AUTH_SECRET_CONFLICT por falta de independencia
+        var identicalSecretsClient = new InMemoryServiceResourcesClient(options);
+        await identicalSecretsClient.CreateBasicAuthSecretAsync(
+            options.Namespace,
+            ServiceDatabaseTarget.Identity.BuildAuthSecretName(TenantId),
+            ServiceDatabaseTarget.BuildResourceLabels(context, ServiceDatabaseTarget.Identity, includeCnpgReload: true),
+            ServiceDatabaseTarget.Identity.RoleName,
+            "SharedPasswordNotAllowed!",
+            CancellationToken.None);
+        await identicalSecretsClient.CreateBasicAuthSecretAsync(
+            options.Namespace,
+            ServiceDatabaseTarget.Clinical.BuildAuthSecretName(TenantId),
+            ServiceDatabaseTarget.BuildResourceLabels(context, ServiceDatabaseTarget.Clinical, includeCnpgReload: true),
+            ServiceDatabaseTarget.Clinical.RoleName,
+            "SharedPasswordNotAllowed!",
+            CancellationToken.None);
+
+        var identicalHandler = new CloudNativePgServiceDatabasesStageHandler(
+            clusterClient,
+            identicalSecretsClient,
+            new RecordingSqlVerifier(),
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance);
+
+        var identicalResult = await identicalHandler.ExecuteAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TerminalFailure, identicalResult.Outcome);
+        Assert.Equal("CNPG_AUTH_SECRET_CONFLICT", identicalResult.ErrorCode);
+        Assert.Equal(0, identicalSecretsClient.SecretReplaceCount);
+    }
+
+    [Theory]
+    [InlineData("kubernetes.io/tls", null, null, null)]
+    [InlineData("Opaque", "cluster-a", null, null)]
+    [InlineData("Opaque", null, "wrong-purpose", null)]
+    [InlineData("Opaque", null, null, "clinical")]
+    public async Task StageHandler_RejectsInvalidOrMisidentifiedDistributionSecretsWithoutWriting(
+        string secretType,
+        string? cnpgClusterLabel,
+        string? purposeOverride,
+        string? serviceOverride)
+    {
+        var options = CreateEnabledOptions();
+        var context = CreateContext(ProvisioningStage.ServiceDatabases);
+        var clusterClient = new FakeClusterClient(BuildReadyCluster(options, context, ClusterUid, CloudNativePgClusterSpec.RequiredServicePgHbaRules));
+        var resourceClient = new InMemoryServiceResourcesClient(options);
+
+        var idSecret = resourceClient.Secrets[(options.ServiceDatabases.IdentityDistributionSecret.Namespace, options.ServiceDatabases.IdentityDistributionSecret.Name)];
+        idSecret.Type = secretType;
+        if (cnpgClusterLabel is not null)
+        {
+            idSecret.Labels[ServiceDatabaseTarget.CnpgClusterLabelKey] = cnpgClusterLabel;
+        }
+
+        if (purposeOverride is not null)
+        {
+            idSecret.Labels[ServiceDatabaseTarget.PurposeLabelKey] = purposeOverride;
+        }
+
+        if (serviceOverride is not null)
+        {
+            idSecret.Labels[ServiceDatabaseTarget.ServiceLabelKey] = serviceOverride;
+        }
+
+        var handler = new CloudNativePgServiceDatabasesStageHandler(
+            clusterClient,
+            resourceClient,
+            new RecordingSqlVerifier(),
+            options,
+            TimeProvider.System,
+            NullLogger<CloudNativePgServiceDatabasesStageHandler>.Instance);
+
+        var result = await handler.ExecuteAsync(context, CancellationToken.None);
+        Assert.Equal(ProvisioningStageOutcomeKind.TerminalFailure, result.Outcome);
+        Assert.Equal("CNPG_DISTRIBUTION_SECRET_CONFLICT", result.ErrorCode);
+        Assert.Equal(0, resourceClient.AuthSecretCreateCount);
+        Assert.Equal(0, resourceClient.SecretReplaceCount);
+    }
+
     [Theory]
     [InlineData("CNPG_PGHBA_NOT_APPLIED")]
     [InlineData("CNPG_ROLE_WAIT")]
@@ -490,7 +677,7 @@ public sealed class CloudNativePgServiceDatabasesTests
     {
         public string Namespace { get; init; } = string.Empty;
         public string Name { get; init; } = string.Empty;
-        public string Type { get; init; } = "Opaque";
+        public string Type { get; set; } = "Opaque";
         public int Version { get; set; } = 1;
         public Dictionary<string, string> Labels { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> Data { get; } = new(StringComparer.Ordinal);
@@ -512,16 +699,28 @@ public sealed class CloudNativePgServiceDatabasesTests
     {
         public InMemoryServiceResourcesClient(CloudNativePgOptions options)
         {
-            Secrets[(options.ServiceDatabases.IdentityDistributionSecret.Namespace, options.ServiceDatabases.IdentityDistributionSecret.Name)] = new MutableSecretRecord
+            Secrets[(options.ServiceDatabases.IdentityDistributionSecret.Namespace, options.ServiceDatabases.IdentityDistributionSecret.Name)] = CreateDistributionSecretRecord(
+                options.ServiceDatabases.IdentityDistributionSecret.Namespace,
+                options.ServiceDatabases.IdentityDistributionSecret.Name,
+                ServiceDatabaseTarget.Identity);
+            Secrets[(options.ServiceDatabases.ClinicalDistributionSecret.Namespace, options.ServiceDatabases.ClinicalDistributionSecret.Name)] = CreateDistributionSecretRecord(
+                options.ServiceDatabases.ClinicalDistributionSecret.Namespace,
+                options.ServiceDatabases.ClinicalDistributionSecret.Name,
+                ServiceDatabaseTarget.Clinical);
+        }
+
+        private static MutableSecretRecord CreateDistributionSecretRecord(string @namespace, string name, ServiceDatabaseTarget target)
+        {
+            var record = new MutableSecretRecord
             {
-                Namespace = options.ServiceDatabases.IdentityDistributionSecret.Namespace,
-                Name = options.ServiceDatabases.IdentityDistributionSecret.Name
+                Namespace = @namespace,
+                Name = name,
+                Type = ServiceDatabaseTarget.OpaqueSecretType
             };
-            Secrets[(options.ServiceDatabases.ClinicalDistributionSecret.Namespace, options.ServiceDatabases.ClinicalDistributionSecret.Name)] = new MutableSecretRecord
-            {
-                Namespace = options.ServiceDatabases.ClinicalDistributionSecret.Namespace,
-                Name = options.ServiceDatabases.ClinicalDistributionSecret.Name
-            };
+            record.Labels[CloudNativePgClusterSpec.ManagedByLabelKey] = CloudNativePgClusterSpec.ManagedByLabelValue;
+            record.Labels[ServiceDatabaseTarget.PurposeLabelKey] = ServiceDatabaseTarget.DistributionPurposeLabelValue;
+            record.Labels[ServiceDatabaseTarget.ServiceLabelKey] = target.ServiceKey;
+            return record;
         }
 
         public Dictionary<(string Ns, string Name), CloudNativePgDatabaseRoleSnapshot> Roles { get; } = new();
@@ -530,6 +729,8 @@ public sealed class CloudNativePgServiceDatabasesTests
         public bool ForceRoleGenerationMismatch { get; init; }
         public bool SimulateNextDistributionConflict { get; set; }
         public int RoleReplaceCount { get; private set; }
+        public int AuthSecretCreateCount { get; private set; }
+        public int SecretReplaceCount { get; private set; }
 
         public Task<KubernetesResourceCallResult<CloudNativePgDatabaseRoleSnapshot>> GetDatabaseRoleAsync(
             string @namespace,
@@ -613,6 +814,7 @@ public sealed class CloudNativePgServiceDatabasesTests
             record.Data[ServiceDatabaseTarget.AuthSecretUsernameKey] = username;
             record.Data[ServiceDatabaseTarget.AuthSecretPasswordKey] = password;
             Secrets[(@namespace, name)] = record;
+            AuthSecretCreateCount++;
 
             return Task.FromResult(new KubernetesResourceCallResult<KubernetesSecretSnapshot>(KubernetesResourceCallStatus.Created, record.ToSnapshot()));
         }
@@ -630,6 +832,7 @@ public sealed class CloudNativePgServiceDatabasesTests
                 return Task.FromResult(new KubernetesResourceCallResult<KubernetesSecretSnapshot>(KubernetesResourceCallStatus.Conflict));
             }
 
+            SecretReplaceCount++;
             var record = Secrets[(@namespace, name)];
             record.Data.Clear();
             foreach (var entry in updatedData)

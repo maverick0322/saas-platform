@@ -21,8 +21,12 @@ internal sealed record ServiceDatabaseTarget(
     public const string DatabaseKind = "Database";
 
     public const string ServiceLabelKey = "vital.saas/service";
+    public const string PurposeLabelKey = "vital.saas/purpose";
+    public const string DistributionPurposeLabelValue = "tenant-db-connections";
     public const string CnpgReloadLabelKey = "cnpg.io/reload";
+    public const string CnpgClusterLabelKey = "cnpg.io/cluster";
     public const string BasicAuthSecretType = "kubernetes.io/basic-auth";
+    public const string OpaqueSecretType = "Opaque";
     public const string AuthSecretUsernameKey = "username";
     public const string AuthSecretPasswordKey = "password";
 
@@ -584,6 +588,32 @@ internal sealed record KubernetesSecretSnapshot(
 
         password = existingPassword;
         return true;
+    }
+
+    public bool TryValidateDistributionSecret(ServiceDatabaseTarget target)
+    {
+        if (!string.IsNullOrWhiteSpace(DeletionTimestamp))
+        {
+            return false;
+        }
+
+        if (!string.Equals(Type, ServiceDatabaseTarget.OpaqueSecretType, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (Labels.ContainsKey(ServiceDatabaseTarget.CnpgClusterLabelKey)
+            || Labels.ContainsKey(ServiceDatabaseTarget.CnpgReloadLabelKey))
+        {
+            return false;
+        }
+
+        return Labels.TryGetValue(CloudNativePgClusterSpec.ManagedByLabelKey, out var managedBy)
+            && string.Equals(managedBy, CloudNativePgClusterSpec.ManagedByLabelValue, StringComparison.Ordinal)
+            && Labels.TryGetValue(ServiceDatabaseTarget.PurposeLabelKey, out var purpose)
+            && string.Equals(purpose, ServiceDatabaseTarget.DistributionPurposeLabelValue, StringComparison.Ordinal)
+            && Labels.TryGetValue(ServiceDatabaseTarget.ServiceLabelKey, out var service)
+            && string.Equals(service, target.ServiceKey, StringComparison.Ordinal);
     }
 
     public static string DecodeUtf8(byte[] bytes)
